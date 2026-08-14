@@ -12,6 +12,12 @@ const App = (() => {
     lastInventory: null,
     aiBusy: false,
     lookupBusy: false,
+    /** 進行中查詢的世代 token（新查詢遞增，舊回傳不覆寫 UI） */
+    lookupToken: 0,
+    /** 背景 API 查詢中的句子（可切到歷史句而不中斷） */
+    pendingLookupQuery: null,
+    /** 還原「查詢中」畫面用 */
+    pendingLookupLoadingHtml: null,
     /**
      * AI 自動填寫背景工作（可離開表單瀏覽歷史／筆記本）
      * @type {null | { id: string, title: string, editingId: string|null, todoSourceId: string|null, status: 'running'|'done'|'error' }}
@@ -37,6 +43,8 @@ const App = (() => {
      * @type {null | { text: string, start: number, end: number }}
      */
     pendingSelApply: null,
+    /** 空專案整首匯入 */
+    bulkImport: null,
     /**
      * 進入表單前的頁面（AI 填寫／取消時跳回）
      * @type {null | string}
@@ -47,6 +55,8 @@ const App = (() => {
      * @type {null | { ruleId: string, ruleTitle: string }}
      */
     locateTarget: null,
+    /** 規則挑選清單世代，避免形態素分析回傳覆寫較新結果 */
+    rulePickGen: 0,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -123,10 +133,89 @@ const App = (() => {
     if (apiG) apiG.checked = Boolean(modes.apiGrammar);
     if (localG) localG.checked = Boolean(modes.localGrammar);
     if (apiV) apiV.checked = Boolean(modes.apiVocab);
+    updateKiwiStatusUI();
     const keyReq = $("#settings-api-key-req");
     if (keyReq) keyReq.hidden = !(modes.apiGrammar || modes.apiVocab);
     syncSettingsModesAllBtn(modes);
     updateApiStatusDot();
+    updateBulkImportHint();
+  }
+
+  function updateKiwiStatusUI() {
+    const box = $("#settings-kiwi-enabled");
+    if (box) {
+      box.checked =
+        typeof KiwiService !== "undefined" ? KiwiService.isEnabled() : Storage.loadSettings().kiwiEnabled !== false;
+    }
+    const el = $("#settings-kiwi-status");
+    if (!el) return;
+    const enabled = typeof KiwiService !== "undefined" ? KiwiService.isEnabled() : false;
+    if (!enabled) {
+      el.hidden = true;
+      el.textContent = "";
+      el.className = "kiwi-status";
+      return;
+    }
+    const st = KiwiService.getStatus();
+    el.className = `kiwi-status ${st.status}`;
+    if (st.status === "loading") {
+      el.hidden = false;
+      el.textContent = "背景載入模型中…";
+    } else if (st.status === "error") {
+      el.hidden = false;
+      el.textContent = `載入失敗：${st.error || "未知錯誤"}`;
+    } else if (st.status === "ready") {
+      el.hidden = false;
+      el.textContent = "已在背景就緒";
+    } else {
+      el.hidden = true;
+      el.textContent = "";
+    }
+  }
+
+  function onKiwiToggle() {
+    const on = Boolean($("#settings-kiwi-enabled")?.checked);
+    Storage.saveSettings({ kiwiEnabled: on });
+    updateKiwiStatusUI();
+    if (on && typeof KiwiService !== "undefined") {
+      showToast("已開啟形態素分析（背景載入）", "info");
+      KiwiService.warmup().then(async () => {
+        updateKiwiStatusUI();
+        if (state.lastQuery && state.lastInventory) {
+          await applyKiwiToInventory(state.lastQuery, state.lastInventory);
+          if (typeof refreshLookupFromInventory === "function") refreshLookupFromInventory();
+        }
+      });
+    } else {
+      showToast("已關閉形態素分析", "info");
+    }
+  }
+
+  async function applyKiwiToInventory(query, inventory) {
+    if (typeof KiwiService === "undefined" || !KiwiService.isEnabled()) return inventory;
+    const apply = async () => {
+      try {
+        const next = await KiwiService.enrichInventory(query, inventory);
+        if (state.lastQuery === query && state.lastInventory === inventory) {
+          state.lastInventory = next;
+          if (typeof refreshLookupFromInventory === "function") refreshLookupFromInventory();
+        }
+        return next;
+      } catch (err) {
+        console.warn("[kiwi] enrich failed", err);
+        return inventory;
+      }
+    };
+    if (KiwiService.getStatus().status !== "ready") {
+      KiwiService.warmup().then(apply);
+      return inventory;
+    }
+    try {
+      return await KiwiService.enrichInventory(query, inventory);
+    } catch (err) {
+      console.warn("[kiwi] enrich failed", err);
+      return inventory;
+    }
   }
 
   /** 全部開啟：API 文法 + API 單字（本地關閉，因文法互斥） */
@@ -185,10 +274,14 @@ const App = (() => {
       v.classList.toggle("hidden", v.id !== `view-${view}`);
     });
     if (view === "rules") renderRulesList();
+    if (view === "vocab") renderVocabBankList();
     if (view === "todos") renderTodos();
     if (view === "history") renderHistory();
     if (view === "settings") fillSettingsForm();
-    if (view === "lookup") updateLookupModeUI();
+    if (view === "lookup") {
+      updateLookupModeUI();
+      syncProjectBulkImport();
+    }
     updateRuleCount();
     updateApiStatusDot();
   }
@@ -214,6 +307,32 @@ const App = (() => {
     }
   }
 
+  /** 以全域單字庫補本句 vocab */
+  function prepareInventoryVocab(inventory, query) {
+    if (!inventory) return inventory;
+    const q = String(query || state.lastQuery || "");
+    if (typeof Storage.mergeVocabWithBank === "function") {
+      inventory.vocab = Storage.mergeVocabWithBank(
+        Array.isArray(inventory.vocab) ? inventory.vocab : [],
+        q
+      );
+    } else if (!Array.isArray(inventory.vocab)) {
+      inventory.vocab = [];
+    }
+    return inventory;
+  }
+
+  function rememberInventoryVocab(inventory, opts = {}) {
+    if (
+      typeof Storage.upsertVocabBankEntries === "function" &&
+      inventory &&
+      Array.isArray(inventory.vocab) &&
+      inventory.vocab.length
+    ) {
+      Storage.upsertVocabBankEntries(inventory.vocab, opts);
+    }
+  }
+
   /**
    * 用既有盤點結果（或歷史快照）渲染查詢頁，並依「目前」筆記本重分類已收錄／未收錄
    */
@@ -222,6 +341,7 @@ const App = (() => {
     const box = $("#lookup-result");
     if (!box || !q) return null;
 
+    prepareInventoryVocab(inventory, q);
     // 再正規化（補整句 translation 等；保留手動校正欄位）
     const normalized =
       typeof AiService !== "undefined" && AiService.normalizeInventory
@@ -244,6 +364,8 @@ const App = (() => {
       mode: inventory?.mode || "",
       source: inventory?.source || "",
     };
+    // normalize 可能洗掉 bank merge，再補一次
+    prepareInventoryVocab(inv, q);
     // API 常漏報「句中有 줘 卻沒列請托」→ 依表面補項（綁本地卡）
     if (typeof RulesService.enrichInventoryWithSurfaceHints === "function") {
       inv = RulesService.enrichInventoryWithSurfaceHints(q, inv);
@@ -265,7 +387,7 @@ const App = (() => {
         vocab: inv.vocab,
       }) +
       `<div class="lookup-result-body">` +
-      localMatchesHtml(apiHl.ownedHits || []) +
+      localMatchesHtml(apiHl.ownedHits || [], inv) +
       missingInventoryHtml(inv, apiHl.missingItems) +
       `</div></div>`;
 
@@ -314,6 +436,7 @@ const App = (() => {
       vocab,
     });
     updateLookupNavBtns();
+    updateBackgroundLookupBanner();
     if (items.length) {
       showToast(
         `已依目前筆記本重看：已收錄 ${(apiHl.ownedHits || []).length} · 尚未 ${(apiHl.missingItems || []).length}`,
@@ -363,6 +486,7 @@ const App = (() => {
       });
     }
     updateProjectModeUI();
+    updateBackgroundLookupBanner();
     if (!opts.silent) {
       if (items.length) {
         showToast(
@@ -400,7 +524,7 @@ const App = (() => {
       }
     }
     if (!all.length) {
-      box.innerHTML = `<div class="empty-state"><p>還沒有查詢紀錄。<br/>到「查詢」輸入句子並完成 API 盤點後會出現在這裡。</p></div>`;
+      box.innerHTML = `<div class="empty-state"><p>還沒有查詢紀錄。<br/>到「查詢」輸入句子並完成盤點後會出現在這裡。</p></div>`;
       return;
     }
     if (!list.length) {
@@ -508,7 +632,7 @@ const App = (() => {
       }
       if (posEl) {
         if (total === 0) {
-          posEl.textContent = "尚無句子 · 查詢後會編為第 1 號";
+          posEl.textContent = "尚無句子 · 可一次放入歌詞，或查詢後編為第 1 號";
         } else if (curSeq != null && entries.some((e) => e.seq === curSeq)) {
           const idx = entries.findIndex((e) => e.seq === curSeq) + 1;
           posEl.textContent = `第 ${curSeq} 號 · ${idx}/${total} 句`;
@@ -519,6 +643,370 @@ const App = (() => {
     }
 
     updateLookupNavBtns();
+    syncProjectBulkImport();
+  }
+
+  function isEmptyActiveProject() {
+    const p = Storage.getActiveProject();
+    if (!p) return false;
+    return Storage.getProjectEntriesSorted(p).length === 0;
+  }
+
+  function splitBulkLines(text) {
+    const rawLines = String(text || "").split(/\r?\n/);
+    const nonempty = rawLines.map((s) => s.trim()).filter(Boolean);
+    const seen = new Set();
+    const lines = [];
+    let skippedDup = 0;
+    for (const line of nonempty) {
+      const key = Storage.normalizeQueryKey(line);
+      if (!key) continue;
+      if (seen.has(key)) {
+        skippedDup += 1;
+        continue;
+      }
+      seen.add(key);
+      lines.push(line);
+    }
+    return {
+      lines,
+      rawCount: rawLines.length,
+      nonemptyCount: nonempty.length,
+      skippedEmpty: rawLines.length - nonempty.length,
+      skippedDup,
+    };
+  }
+
+  function formatBulkStat(info) {
+    if (!info || !info.nonemptyCount) return "尚未貼上內容";
+    const bits = [`將匯入 ${info.lines.length} 句`];
+    if (info.skippedEmpty) bits.push(`略過空行 ${info.skippedEmpty}`);
+    if (info.skippedDup) bits.push(`重複合併 ${info.skippedDup}`);
+    return bits.join(" · ");
+  }
+
+  function updateBulkImportHint() {
+    const modeEl = $("#project-bulk-mode");
+    if (modeEl && typeof Storage.formatLookupModesLabel === "function") {
+      modeEl.textContent = Storage.formatLookupModesLabel(Storage.loadLookupModes());
+    }
+    const stat = $("#project-bulk-stat");
+    const ta = $("#project-bulk-input");
+    if (stat && ta && !state.bulkImport?.running) {
+      stat.textContent = formatBulkStat(splitBulkLines(ta.value));
+    }
+  }
+
+  function isViewingBulkProject() {
+    const job = state.bulkImport;
+    return Boolean(job?.running && job.projectId && Storage.getActiveProjectId() === job.projectId);
+  }
+
+  function syncProjectBulkImport() {
+    const panel = $("#project-bulk-import");
+    if (!panel) return;
+    const running = Boolean(state.bulkImport?.running);
+    const viewingJob = isViewingBulkProject();
+    const empty = isEmptyActiveProject();
+    const compact = viewingJob && !empty;
+    const show =
+      viewingJob || (empty && state.view === "lookup" && !state.lookupBusy && !running);
+    panel.classList.toggle("hidden", !show);
+    panel.classList.toggle("is-compact", compact);
+    if (show && !running) updateBulkImportHint();
+    updateBulkProgressDom();
+  }
+
+  function updateBulkProgressDom() {
+    const box = $("#project-bulk-progress");
+    if (!box) return;
+    const job = state.bulkImport;
+    if (!job?.running) {
+      box.classList.add("hidden");
+      document.body.classList.remove("bulk-import-running");
+      updateBackgroundLookupBanner();
+      return;
+    }
+    const viewingJob = isViewingBulkProject();
+    box.classList.toggle("hidden", !viewingJob);
+    const stillCollecting = viewingJob && isEmptyActiveProject();
+    document.body.classList.toggle("bulk-import-running", stillCollecting);
+    const title = $("#project-bulk-progress-title");
+    const line = $("#project-bulk-progress-line");
+    const fill = $("#project-bulk-progress-fill");
+    const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
+    if (title) {
+      title.textContent = `${stillCollecting ? "分析中" : "背景分析"} ${job.done}／${job.total}${
+        job.failed ? ` · 失敗 ${job.failed}` : ""
+      }`;
+    }
+    if (line) {
+      const now = job.current ? `正在處理「${truncateQueryPreview(job.current, 40)}」` : "";
+      line.textContent = stillCollecting
+        ? now
+        : [now, "可開「專案」看別本；分析不會中斷"].filter(Boolean).join(" · ");
+    }
+    if (fill) fill.style.width = `${pct}%`;
+    updateBackgroundLookupBanner();
+  }
+
+  function persistBulkLine(query, inventory, projectId) {
+    const apiHl = buildApiHighlight(query, inventory);
+    persistLookupResult(query, inventory, apiHl, {
+      silent: true,
+      keepCursor: true,
+      projectId,
+    });
+    return apiHl;
+  }
+
+  async function runProjectBulkImport() {
+    if (state.bulkImport?.running || state.lookupBusy) {
+      showToast("已有查詢進行中", "info");
+      return;
+    }
+    if (!isEmptyActiveProject()) {
+      showToast("專案已有句子，請用上方查詢列逐句新增", "info");
+      syncProjectBulkImport();
+      return;
+    }
+    const info = splitBulkLines($("#project-bulk-input")?.value || "");
+    if (!info.lines.length) {
+      showToast("請先貼上歌詞或文本", "error");
+      $("#project-bulk-input")?.focus();
+      return;
+    }
+    const modes = Storage.loadLookupModes();
+    const needApi = modes.apiGrammar || modes.apiVocab;
+    if (needApi && !Storage.hasApiKey()) {
+      showToast("此模式需要 API Key，請先到「設定」填入（或改開本地文法排查）", "error");
+      setView("settings");
+      return;
+    }
+
+    const startPid = Storage.getActiveProjectId();
+    const startName = Storage.getProject(startPid)?.name || "專案";
+    const job = {
+      running: true,
+      cancel: false,
+      token: ++state.lookupToken,
+      projectId: startPid,
+      projectName: startName,
+      total: info.lines.length,
+      done: 0,
+      failed: 0,
+      skippedDup: info.skippedDup,
+      current: "",
+    };
+    state.bulkImport = job;
+    state.lookupBusy = true;
+    updateBulkProgressDom();
+    syncProjectBulkImport();
+
+    let firstQuery = null;
+    try {
+      for (const line of info.lines) {
+        if (job.cancel || !Storage.getProject(startPid)) break;
+        job.current = line;
+        updateBulkProgressDom();
+        try {
+          const inventory = await fetchLookupInventory(line);
+          if (job.cancel || !Storage.getProject(startPid)) break;
+          persistBulkLine(line, inventory, startPid);
+          if (!firstQuery) firstQuery = line;
+        } catch (err) {
+          if (job.cancel || !Storage.getProject(startPid)) break;
+          job.failed += 1;
+          persistBulkLine(
+            line,
+            {
+              summary: `分析失敗：${err.message || "未知錯誤"}`,
+              translation: "",
+              items: [],
+              vocab: [],
+              mode: "failed",
+              source: "failed",
+            },
+            startPid
+          );
+          if (!firstQuery) firstQuery = line;
+        }
+        job.done += 1;
+        if (firstQuery && job.done === 1 && Storage.getActiveProjectId() === startPid) {
+          const first = Storage.findProjectEntryByQuery(startPid, firstQuery);
+          if (first) {
+            reviewProjectEntry(first, { silent: true });
+            showToast(
+              `第 ${first.seq} 句已可看 · 其餘 ${job.total - 1} 句在背景繼續；可先開其他專案`,
+              "success"
+            );
+          }
+        }
+        if (Storage.getActiveProjectId() === startPid) updateProjectModeUI();
+        if (
+          !$("#project-entries-modal")?.classList.contains("hidden") &&
+          Storage.getActiveProjectId() === startPid
+        ) {
+          renderProjectEntriesList(startPid);
+        }
+        if (needApi && !job.cancel) {
+          await new Promise((r) => setTimeout(r, 280));
+        }
+      }
+    } finally {
+      state.lookupBusy = false;
+      const cancelled = job.cancel;
+      const done = job.done;
+      const failed = job.failed;
+      const skippedDup = job.skippedDup;
+      state.bulkImport = null;
+      document.body.classList.remove("bulk-import-running");
+      updateBulkProgressDom();
+      updateProjectModeUI();
+
+      const viewing = Storage.getActiveProjectId() === startPid;
+      const entries = viewing ? Storage.getProjectEntriesSorted(startPid) : [];
+      if (viewing && entries.length && firstQuery && !isViewingLookupQuery(firstQuery) && !state.lastQuery) {
+        const first =
+          Storage.findProjectEntryByQuery(startPid, firstQuery) || entries[0];
+        reviewProjectEntry(first, { silent: true });
+      }
+      const ta = $("#project-bulk-input");
+      if (ta) ta.value = "";
+      syncProjectBulkImport();
+
+      const bits = [`「${startName}」已匯入 ${done} 句`];
+      if (skippedDup) bits.push(`重複合併 ${skippedDup}`);
+      if (failed) bits.push(`失敗 ${failed}`);
+      if (cancelled && done < info.lines.length) bits.push("已取消其餘");
+      showToast(bits.join(" · "), failed ? "info" : "success");
+    }
+  }
+
+  function cancelProjectBulkImport() {
+    if (!state.bulkImport?.running) return;
+    state.bulkImport.cancel = true;
+    const title = $("#project-bulk-progress-title");
+    if (title) title.textContent = "正在取消…";
+  }
+
+  function normalizeLookupKey(q) {
+    return String(q || "")
+      .trim()
+      .replace(/\s+/g, " ");
+  }
+
+  function isViewingLookupQuery(query) {
+    return normalizeLookupKey($("#lookup-input")?.value) === normalizeLookupKey(query);
+  }
+
+  function truncateQueryPreview(q, max = 36) {
+    const s = String(q || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    if (!s) return "";
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+  }
+
+  function ensureLookupBgBanner() {
+    let el = $("#lookup-bg-banner");
+    if (el) return el;
+    const form = $("#lookup-form");
+    const result = $("#lookup-result");
+    if (!form && !result) return null;
+    el = document.createElement("div");
+    el.id = "lookup-bg-banner";
+    el.className = "lookup-bg-banner hidden";
+    el.setAttribute("role", "status");
+    if (form) form.insertAdjacentElement("afterend", el);
+    else result.insertAdjacentElement("beforebegin", el);
+    return el;
+  }
+
+  /** API 查詢中切到已查過句子、或整批分析時去看別的專案 */
+  function updateBackgroundLookupBanner() {
+    const el = ensureLookupBgBanner();
+    if (!el) return;
+    const job = state.bulkImport;
+    if (job?.running && !isViewingBulkProject()) {
+      const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
+      el.classList.remove("hidden");
+      el.innerHTML = `
+        <div class="lookup-bg-banner-main">
+          <strong>整批分析進行中</strong>
+          <span>專案「${esc(job.projectName || "未命名")}」${job.done}／${job.total}${
+            job.failed ? ` · 失敗 ${job.failed}` : ""
+          }（${pct}%）· 不中斷目前瀏覽</span>
+        </div>
+        <div class="lookup-bg-banner-actions">
+          <button type="button" class="btn btn-sm btn-secondary" id="btn-return-bulk-project">
+            回該專案
+          </button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btn-cancel-bulk-away">
+            取消其餘
+          </button>
+        </div>`;
+      el.querySelector("#btn-return-bulk-project")?.addEventListener("click", () => {
+        if (job.projectId) enterProject(job.projectId);
+      });
+      el.querySelector("#btn-cancel-bulk-away")?.addEventListener("click", () => {
+        cancelProjectBulkImport();
+        updateBackgroundLookupBanner();
+      });
+      return;
+    }
+    const pending = state.pendingLookupQuery;
+    if (!state.lookupBusy || !pending || job?.running) {
+      el.classList.add("hidden");
+      el.innerHTML = "";
+      return;
+    }
+    if (isViewingLookupQuery(pending)) {
+      el.classList.add("hidden");
+      el.innerHTML = "";
+      return;
+    }
+    el.classList.remove("hidden");
+    el.innerHTML = `
+      <div class="lookup-bg-banner-main">
+        <strong>API 背景查詢中</strong>
+        <span>「${esc(truncateQueryPreview(pending))}」完成後會自動存入${
+          Storage.getActiveProjectId() ? "專案" : "歷史"
+        }，不中斷目前瀏覽。</span>
+      </div>
+      <button type="button" class="btn btn-sm btn-secondary" id="btn-return-pending-lookup">
+        回到查詢中
+      </button>`;
+    el.querySelector("#btn-return-pending-lookup")?.addEventListener("click", () => {
+      returnToPendingLookup();
+    });
+  }
+
+  function returnToPendingLookup() {
+    const pending = state.pendingLookupQuery;
+    if (!pending || !state.lookupBusy) {
+      updateBackgroundLookupBanner();
+      return;
+    }
+    if ($("#lookup-input")) $("#lookup-input").value = pending;
+    state.lastQuery = pending;
+    const box = $("#lookup-result");
+    if (box && state.pendingLookupLoadingHtml) {
+      box.innerHTML = state.pendingLookupLoadingHtml;
+      bindLookupResultEvents(pending, null);
+      syncAppHeaderHeight();
+    }
+    updateBackgroundLookupBanner();
+    updateLookupNavBtns();
+    if (isProjectMode()) updateProjectModeUI();
+  }
+
+  function clearPendingLookup(token) {
+    if (token != null && token !== state.lookupToken) return;
+    state.lookupBusy = false;
+    state.pendingLookupQuery = null;
+    state.pendingLookupLoadingHtml = null;
+    updateBackgroundLookupBanner();
   }
 
   /**
@@ -681,7 +1169,7 @@ const App = (() => {
   function handleLookupArrowNav(e) {
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return false;
     if (state.view !== "lookup") return false;
-    if (state.lookupBusy) return false;
+    // 查詢進行中仍可切到已查過句子（背景 API 不中斷）
     if (isEditableKeyTarget(e.target)) return false;
     if (!$("#vocab-edit-modal")?.classList.contains("hidden")) return false;
     if (!$("#rule-pick-modal")?.classList.contains("hidden")) return false;
@@ -817,6 +1305,9 @@ const App = (() => {
           )
         ) {
           return;
+        }
+        if (state.bulkImport?.running && state.bulkImport.projectId === id) {
+          cancelProjectBulkImport();
         }
         Storage.deleteProject(id);
         if (!Storage.getActiveProjectId()) {
@@ -999,6 +1490,13 @@ const App = (() => {
         Storage.removeProjectEntry(projectId, entryId);
         if (state.projectCursorSeq === entry.seq) state.projectCursorSeq = null;
         renderProjectEntriesList(projectId);
+        if (isEmptyActiveProject()) {
+          state.lastQuery = "";
+          state.lastInventory = null;
+          if ($("#lookup-input")) $("#lookup-input").value = "";
+          const resultBox = $("#lookup-result");
+          if (resultBox) resultBox.innerHTML = "";
+        }
         updateProjectModeUI();
         showToast(`已刪除第 ${entry.seq} 號`, "info");
       });
@@ -1016,6 +1514,8 @@ const App = (() => {
     closeProjectsModal();
     setView("lookup");
     updateProjectModeUI();
+    syncProjectBulkImport();
+    updateBackgroundLookupBanner();
     const entries = Storage.getProjectEntriesSorted(p);
     if (entries.length) {
       // 進入時顯示第一句（若有快照則重看）
@@ -1026,7 +1526,10 @@ const App = (() => {
       if (input) input.value = "";
       const box = $("#lookup-result");
       if (box) box.innerHTML = "";
-      showToast(`已進入專案「${p.name}」· 查詢第一句將編為第 1 號`, "success");
+      state.lastQuery = "";
+      state.lastInventory = null;
+      syncProjectBulkImport();
+      showToast(`已進入專案「${p.name}」· 可貼上整首一次匯入`, "success");
     }
   }
 
@@ -1038,7 +1541,15 @@ const App = (() => {
     Storage.setActiveProjectId(null);
     state.projectCursorSeq = null;
     updateProjectModeUI();
-    showToast("已離開專案（一般查詢模式）", "info");
+    $("#project-bulk-import")?.classList.add("hidden");
+    syncProjectBulkImport();
+    updateBackgroundLookupBanner();
+    showToast(
+      state.bulkImport?.running
+        ? "已離開專案 · 整批分析仍在背景進行"
+        : "已離開專案（一般查詢模式）",
+      "info"
+    );
   }
 
   function createProjectFromModal() {
@@ -1155,6 +1666,7 @@ const App = (() => {
     applyStructureTheme(s.structureTheme);
     renderThemePicker(s.structureTheme);
     renderStructureThemePreview();
+    updateKiwiStatusUI();
   }
 
   function readLookupModesFromForm() {
@@ -1195,6 +1707,7 @@ const App = (() => {
       apiKey: $("#settings-api-key").value,
       baseUrl: $("#settings-base-url").value,
       model: $("#settings-model").value,
+      kiwiEnabled: $("#settings-kiwi-enabled") ? Boolean($("#settings-kiwi-enabled").checked) : true,
       structureTheme:
         themeBtn?.dataset?.themeId ||
         document.documentElement.getAttribute("data-structure-theme") ||
@@ -1364,7 +1877,7 @@ const App = (() => {
       category: "",
       banner: `<strong>由選字建立</strong> — 已將選取「${esc(
         text
-      )}」寫入規則名（可改成「中文（韓語）」格式）。儲存後會<strong>自動套用到該片段</strong>。`,
+      )}」寫入規則名（可改成「極短中文用法名（韓語）」如 禁止（-지 마））。儲存後會<strong>自動套用到該片段</strong>。`,
     });
   }
 
@@ -1817,13 +2330,18 @@ const App = (() => {
       : typeof tint === "number" && tint >= 0
         ? `<span class="rule-card-color-edge gram-hl-${tint % 8}" aria-hidden="true"></span>`
         : "";
-    const cat = rule.category
+    const catBadge = rule.category
       ? `<span class="badge ${isSupp ? "badge-usage" : "badge-category"}">${esc(
           rule.category
         )}</span>`
       : "";
     const isLookup = mode === "lookup";
     const effectiveHasSpan = isSupp ? null : hasSpan;
+    const unlocatedBadge =
+      isLookup && effectiveHasSpan === false
+        ? `<span class="badge badge-api-fallback">句中未定位</span>`
+        : "";
+    const badgesHtml = [catBadge, unlocatedBadge].filter(Boolean).join("");
     const locateBtn =
       isLookup && effectiveHasSpan !== null
         ? effectiveHasSpan === false
@@ -1838,8 +2356,10 @@ const App = (() => {
       return `
         <div class="rule-card compact${tintClass}" id="rule-${esc(rule.id)}">
           ${colorEdge}
-          <h4>${esc(rule.title)}</h4>
-          ${cat}
+          <div class="rule-card-top">
+            <h4>${esc(rule.title)}</h4>
+            ${badgesHtml ? `<span class="rule-card-badges">${badgesHtml}</span>` : ""}
+          </div>
           <div class="rule-card-actions">
             <button type="button" class="btn btn-sm btn-secondary" data-edit="${esc(rule.id)}">編輯</button>
             ${locateBtn}
@@ -1866,14 +2386,7 @@ const App = (() => {
         ${colorEdge}
         <div class="rule-card-top">
           <h3>${esc(rule.title)}</h3>
-          ${cat}
-          <span class="badge badge-local">本地</span>
-          ${isLookup ? `<span class="badge badge-api-fallback">本句</span>` : ""}
-          ${
-            isLookup && effectiveHasSpan === false
-              ? `<span class="badge badge-api-fallback">句中未定位</span>`
-              : ""
-          }
+          ${badgesHtml ? `<span class="rule-card-badges">${badgesHtml}</span>` : ""}
         </div>
         ${
           rule.structure
@@ -2072,8 +2585,10 @@ const App = (() => {
     };
   }
 
-  function localMatchesHtml(orderedHits) {
+  function localMatchesHtml(orderedHits, inventory) {
     if (!orderedHits.length) {
+      const hasGrammar = Array.isArray(inventory?.items) && inventory.items.length;
+      if (!hasGrammar) return "";
       return `
       <section class="panel" id="lookup-owned-rules">
         <div class="panel-head">
@@ -2930,15 +3445,114 @@ const App = (() => {
     });
   }
 
-  /** 整句翻譯區塊（放在「尚未收錄」標題下方，不是逐條文法） */
-  function sentenceTranslationHtml(inventory) {
+  /** 整句翻譯區塊（可手動貼上／修改；寫回本句 inventory） */
+  function sentenceTranslationHtml(inventory, opts = {}) {
     const t = String(inventory?.translation || "").trim();
-    if (!t) return "";
-    return `
-      <div class="inv-sentence-translation">
+    const editing = Boolean(opts.editing);
+    if (editing) {
+      return `
+      <div class="inv-sentence-translation is-editing" id="inv-translation-block">
         <span class="inv-label">翻譯</span>
-        <p class="inv-sentence-text">${esc(t)}</p>
+        <div class="inv-translation-body">
+          <textarea
+            id="inv-translation-input"
+            class="inv-translation-input"
+            rows="2"
+            placeholder="貼上或輸入整句繁中翻譯…"
+            spellcheck="true"
+          >${esc(t)}</textarea>
+          <div class="inv-translation-actions">
+            <button type="button" class="btn btn-sm btn-primary" data-save-translation>儲存</button>
+            <button type="button" class="btn btn-sm btn-ghost" data-cancel-translation>取消</button>
+          </div>
+        </div>
       </div>`;
+    }
+    return `
+      <div class="inv-sentence-translation" id="inv-translation-block">
+        <span class="inv-label">翻譯</span>
+        <p class="inv-sentence-text${t ? "" : " is-empty"}">${
+          t ? esc(t) : "尚無翻譯 · 可手動貼上或編輯"
+        }</p>
+        <button type="button" class="btn btn-sm btn-secondary inv-translation-edit" data-edit-translation title="編輯翻譯">
+          ${t ? "編輯" : "貼上／編輯"}
+        </button>
+      </div>`;
+  }
+
+  function bindTranslationEditors(root = document) {
+    const scope = root || document;
+    scope.querySelector("[data-edit-translation]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      beginEditSentenceTranslation();
+    });
+    scope.querySelector("[data-save-translation]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      saveSentenceTranslation();
+    });
+    scope.querySelector("[data-cancel-translation]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelEditSentenceTranslation();
+    });
+  }
+
+  function beginEditSentenceTranslation() {
+    const inv = state.lastInventory;
+    if (!inv && state.lastQuery) {
+      state.lastInventory = {
+        summary: "",
+        translation: "",
+        items: [],
+        vocab: [],
+        mode: "manual",
+        source: "manual",
+      };
+    }
+    if (!state.lastInventory) {
+      showToast("請先完成一次查詢", "info");
+      return;
+    }
+    const block = $("#inv-translation-block");
+    if (!block) return;
+    block.outerHTML = sentenceTranslationHtml(state.lastInventory, { editing: true });
+    bindTranslationEditors(document);
+    const ta = $("#inv-translation-input");
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }
+
+  function saveSentenceTranslation() {
+    if (!state.lastInventory) {
+      showToast("沒有可寫入的查詢結果", "error");
+      return;
+    }
+    const v = String($("#inv-translation-input")?.value || "").trim();
+    state.lastInventory.translation = v;
+    if (typeof refreshLookupFromInventory === "function") {
+      refreshLookupFromInventory();
+    } else {
+      const block = $("#inv-translation-block");
+      if (block) {
+        block.outerHTML = sentenceTranslationHtml(state.lastInventory);
+        bindTranslationEditors(document);
+      }
+      if (typeof persistCurrentInventory === "function") {
+        persistCurrentInventory({ silent: true });
+      }
+    }
+    showToast(v ? "已更新翻譯" : "已清除翻譯", "success");
+  }
+
+  function cancelEditSentenceTranslation() {
+    const block = $("#inv-translation-block");
+    if (!block) return;
+    block.outerHTML = sentenceTranslationHtml(state.lastInventory || {});
+    bindTranslationEditors(document);
   }
 
   /** 下方只列 API 找出、筆記本尚未收錄的項目（僅名稱；說明不預填） */
@@ -2952,6 +3566,18 @@ const App = (() => {
     const isLocal = inventory.mode === "local" || inventory.source === "local";
 
     if (!list.length) {
+      const hasVocab = Array.isArray(inventory.vocab) && inventory.vocab.length;
+      if (hasVocab && !isLocal) {
+        if (!sentenceTr && !summary) return "";
+        return `
+        <section class="panel panel-suggest" id="api-inventory-slot">
+          <div class="panel-head">
+            <h3>翻譯</h3>
+          </div>
+          ${sentenceTr}
+          ${summary}
+        </section>`;
+      }
       return `
         <section class="panel panel-suggest" id="api-inventory-slot">
           <div class="panel-head">
@@ -3686,10 +4312,35 @@ const App = (() => {
     return { entry: null, index: -1 };
   }
 
+  /** select 設值；若選項沒有該值則臨時加入，避免無法顯示／再改 */
+  function setSelectValue(sel, value) {
+    if (!sel || sel.tagName !== "SELECT") {
+      if (sel) sel.value = value || "";
+      return;
+    }
+    const v = String(value || "").trim();
+    sel.querySelectorAll("option[data-temp-opt]").forEach((o) => o.remove());
+    if (!v) {
+      sel.value = "";
+      return;
+    }
+    const has = Array.from(sel.options).some((o) => o.value === v);
+    if (!has) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      opt.dataset.tempOpt = "1";
+      sel.appendChild(opt);
+    }
+    sel.value = v;
+  }
+
   function fillVocabEditForm(data = {}) {
     const set = (id, v) => {
       const el = $(id);
-      if (el) el.value = v || "";
+      if (!el) return;
+      if (el.tagName === "SELECT") setSelectValue(el, v);
+      else el.value = v || "";
     };
     set("#vocab-edit-surface", data.surface);
     set("#vocab-edit-lemma", data.lemma);
@@ -3731,15 +4382,26 @@ const App = (() => {
     hideSelApplyPop();
 
     const found = findVocabEntryForRange(range);
+    const bankHit =
+      typeof Storage.lookupVocabBank === "function" ? Storage.lookupVocabBank(text) : null;
     const base = found.entry
       ? { ...found.entry }
-      : { surface: text, lemma: "", pos: "", gloss: "" };
+      : bankHit
+        ? {
+            surface: bankHit.surface || text,
+            lemma: bankHit.lemma || "",
+            pos: bankHit.pos || "",
+            gloss: bankHit.gloss || "",
+          }
+        : { surface: text, lemma: "", pos: "", gloss: "" };
     if (!base.surface) base.surface = text;
     fillVocabEditForm(base);
     setVocabEditBanner(
       found.entry
-        ? `<strong>編輯既有單字</strong> — 修改後按「儲存到本句」。`
-        : `<strong>新增單字解釋</strong> — 可手動填寫或按「AI 填寫」。`,
+        ? `<strong>編輯既有單字</strong> — 修改後按「儲存到本句」（並更新本地單字庫）。`
+        : bankHit
+          ? `<strong>來自本地單字庫</strong> — 可修改後儲存到本句。`
+          : `<strong>新增單字解釋</strong> — 可手動填寫或按「AI 填寫」；儲存後寫入本句與本地單字庫。`,
       "info"
     );
     const preview = $("#vocab-edit-span-preview");
@@ -3814,11 +4476,14 @@ const App = (() => {
       if (!replaced) list.push(row);
     }
     state.lastInventory.vocab = list;
+    if (typeof Storage.upsertVocabBankEntries === "function") {
+      Storage.upsertVocabBankEntries([row], { preferIncoming: true });
+    }
     closeVocabEditModal();
     state.selApply = null;
     window.getSelection()?.removeAllRanges();
     refreshLookupFromInventory();
-    showToast(`已寫入單字「${surface}」`, "success");
+    showToast(`已寫入單字「${surface}」（本句＋本地庫）`, "success");
   }
 
   async function runVocabEditAi() {
@@ -4198,7 +4863,7 @@ const App = (() => {
       sub.innerHTML =
         `選取片段：<strong id="rule-pick-span-preview" class="rule-pick-span">${esc(
           cap.text
-        )}</strong> — 依選取字<strong>本地</strong>推送可能規則置頂；只影響本句，不改筆記本。`;
+        )}</strong> — 依選取字與<strong>形態素分析</strong>推送可能規則置頂；只影響本句，不改筆記本。`;
     }
     const createHint = $(".rule-pick-create-hint");
     if (createHint) {
@@ -4221,9 +4886,10 @@ const App = (() => {
     state.rulePickMode = null;
   }
 
-  function renderRulePickList() {
+  async function renderRulePickList() {
     const box = $("#rule-pick-list");
     if (!box) return;
+    const gen = ++state.rulePickGen;
     const q = String($("#rule-pick-filter")?.value || "")
       .trim()
       .toLowerCase();
@@ -4269,7 +4935,36 @@ const App = (() => {
       return;
     }
 
-    // 依選取片段本地智慧排序
+    // 依選取片段本地智慧排序（有 Kiwi 時帶入語素提示）
+    let kiwiHints = [];
+    if (
+      selText &&
+      typeof KiwiService !== "undefined" &&
+      KiwiService.isEnabled() &&
+      state.lastQuery
+    ) {
+      const kiwiSt = KiwiService.getStatus();
+      if (kiwiSt.status === "ready") {
+        try {
+          const cap = state.selApply;
+          kiwiHints = await KiwiService.hintsForSpan(
+            state.lastQuery,
+            cap?.start,
+            cap?.end
+          );
+        } catch (err) {
+          console.warn("[kiwi] span hints failed", err);
+        }
+      } else {
+        KiwiService.warmup().then(() => {
+          if (gen === state.rulePickGen && !$("#rule-pick-modal")?.classList.contains("hidden")) {
+            renderRulePickList();
+          }
+        });
+      }
+    }
+    if (gen !== state.rulePickGen) return;
+
     let suggestions = [];
     let rest = RulesService.getAll();
     if (
@@ -4280,6 +4975,7 @@ const App = (() => {
       const ranked = RulesService.rankRulesForSpan(selText, {
         minScore: 8,
         maxSuggest: 8,
+        kiwiHints,
       });
       suggestions = ranked.suggestions || [];
       rest = ranked.rest || rest;
@@ -4290,6 +4986,7 @@ const App = (() => {
         const ranked = RulesService.rankRulesForSpan(selText, {
           minScore: 6,
           maxSuggest: 12,
+          kiwiHints,
         });
         const matchQ = (r) => {
           const blob = `${r.title || ""} ${r.category || ""} ${r.explanation || ""}`.toLowerCase();
@@ -4464,7 +5161,7 @@ const App = (() => {
       });
       // 若像語尾可預填
       $("#form-title").value = "";
-      $("#form-title").placeholder = "中文功能名（韓語標記）";
+      $("#form-title").placeholder = "禁止（-지 마）";
     });
 
     $("#btn-todo-from-query")?.addEventListener("click", () => {
@@ -4515,6 +5212,7 @@ const App = (() => {
 
     // 選字套用：掛在 sentence-board（句首邊距拖選也吃得到）
     bindSentenceSelectionHandlers();
+    bindTranslationEditors(root);
   }
 
   /**
@@ -4580,7 +5278,94 @@ const App = (() => {
     };
   }
 
+  async function fetchLookupInventory(query) {
+    const form = String(query || "").trim();
+    const modes = Storage.loadLookupModes();
+    const anyMode = modes.apiGrammar || modes.localGrammar || modes.apiVocab;
+    if (!anyMode) {
+      return {
+        summary: "手動模式",
+        translation: "",
+        items: [],
+        vocab: [],
+        mode: "manual",
+        source: "manual",
+      };
+    }
+    const needApi = modes.apiGrammar || modes.apiVocab;
+    if (modes.localGrammar && !needApi) {
+      return buildLocalInventory(form);
+    }
+    if (needApi && !Storage.hasApiKey()) {
+      const err = new Error("此模式需要 API Key，請先到「設定」填入（或改開本地文法排查）");
+      err.code = "NEED_API_KEY";
+      throw err;
+    }
+
+    const wantApiVocab = Boolean(modes.apiVocab);
+    const wantApiGrammar = Boolean(modes.apiGrammar);
+    const skipVocabApi =
+      wantApiVocab &&
+      typeof Storage.estimateVocabBankCoverage === "function" &&
+      (() => {
+        const cov = Storage.estimateVocabBankCoverage(form, []);
+        return cov.total >= 2 && cov.ratio >= 0.85 && cov.hit >= 2;
+      })();
+    let inventory;
+
+    if (modes.localGrammar) {
+      inventory = buildLocalInventory(form);
+      if (wantApiVocab && !skipVocabApi) {
+        const apiInv =
+          typeof AiService.inventoryVocabOnly === "function"
+            ? await AiService.inventoryVocabOnly(form)
+            : await AiService.inventoryGrammar(form, []);
+        inventory.vocab = Array.isArray(apiInv.vocab) ? apiInv.vocab : [];
+        if (apiInv.translation) inventory.translation = apiInv.translation;
+        inventory.summary = `${inventory.summary || ""} · API 單字 ${inventory.vocab.length}`.trim();
+      } else if (wantApiVocab && skipVocabApi) {
+        inventory.vocab = [];
+        inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API）`.trim();
+      }
+    } else if (wantApiGrammar) {
+      const titles = RulesService.getAll().map((r) => r.title);
+      inventory = await AiService.inventoryGrammar(form, titles);
+      inventory.mode = "api";
+      inventory.source = "api";
+      if (!wantApiVocab || skipVocabApi) {
+        inventory.vocab = [];
+        if (skipVocabApi) {
+          inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API 單字）`.trim();
+        }
+      }
+    } else if (wantApiVocab && skipVocabApi) {
+      inventory = {
+        summary: "本地單字庫（略過 API）",
+        translation: "",
+        items: [],
+        vocab: [],
+        mode: "local-bank",
+        source: "local-bank",
+      };
+    } else if (wantApiVocab) {
+      inventory =
+        typeof AiService.inventoryVocabOnly === "function"
+          ? await AiService.inventoryVocabOnly(form)
+          : await AiService.inventoryGrammar(form, []);
+      inventory.mode = "api";
+      inventory.source = "api";
+      inventory.items = [];
+      inventory.summary =
+        inventory.summary || `API 單字查詢：${(inventory.vocab || []).length} 詞`;
+    } else {
+      inventory = { summary: "", translation: "", items: [], vocab: [], mode: "api", source: "api" };
+    }
+    return inventory;
+  }
+
   function persistLookupResult(query, inventory, apiHl, opts = {}) {
+    prepareInventoryVocab(inventory, query);
+    rememberInventoryVocab(inventory, { preferIncoming: false });
     const payload = {
       query,
       summary: inventory.summary || "",
@@ -4590,13 +5375,16 @@ const App = (() => {
       items: inventory.items || [],
       vocab: inventory.vocab || [],
     };
-    const activePid = Storage.getActiveProjectId();
+    const activePid = opts.projectId || Storage.getActiveProjectId();
     if (activePid) {
       const before = Storage.findProjectEntryByQuery(activePid, query);
       Storage.upsertProjectEntry(activePid, payload);
       const after = Storage.findProjectEntryByQuery(activePid, query);
-      if (after?.seq != null) state.projectCursorSeq = after.seq;
-      updateProjectModeUI();
+      // keepCursor：背景完成時不把游標跳到剛查完的句子
+      const viewing = Storage.getActiveProjectId() === activePid;
+      if (after?.seq != null && !opts.keepCursor && viewing) state.projectCursorSeq = after.seq;
+      if (!opts.keepCursor && viewing) updateProjectModeUI();
+      else updateLookupNavBtns();
       if (!opts.silent) {
         if (before) {
           showToast(`已更新第 ${after?.seq} 號快照（序號不變）`, "success");
@@ -4610,8 +5398,9 @@ const App = (() => {
     }
   }
 
-  function runLocalLookup(query) {
-    const inventory = buildLocalInventory(query);
+  async function runLocalLookup(query) {
+    let inventory = buildLocalInventory(query);
+    inventory = await applyKiwiToInventory(query, inventory);
     state.lastInventory = inventory;
     const apiHl =
       applyInventoryToLookup(query, inventory) || buildApiHighlight(query, inventory);
@@ -4627,6 +5416,14 @@ const App = (() => {
   }
 
   async function runLookup(forcedQuery) {
+    if (state.bulkImport?.running) {
+      if (isViewingBulkProject()) {
+        showToast("此專案正在整批分析，可用 ← → 或「句子列表」先看已完成的句子", "info");
+      } else {
+        showToast("另有專案正在整批分析。可先看目前專案已有句子，或按提示列回到分析中的專案", "info");
+      }
+      return;
+    }
     const input = $("#lookup-input");
     const query = (forcedQuery != null ? forcedQuery : input?.value || "").trim();
     if (!query) {
@@ -4635,6 +5432,9 @@ const App = (() => {
     }
     if (input && forcedQuery != null) input.value = query;
     state.lastQuery = query;
+    if (typeof KiwiService !== "undefined" && KiwiService.isEnabled()) {
+      KiwiService.tokenize(query).catch(() => {});
+    }
 
     const box = $("#lookup-result");
     if (!box) return;
@@ -4643,7 +5443,7 @@ const App = (() => {
     const anyMode = modes.apiGrammar || modes.localGrammar || modes.apiVocab;
     // 未開啟任何掃描：仍可查詢、顯示句子，供選字套用／補充用法
     if (!anyMode) {
-      const inventory = {
+      let inventory = {
         summary: "手動模式",
         translation: "",
         items: [],
@@ -4651,6 +5451,7 @@ const App = (() => {
         mode: "manual",
         source: "manual",
       };
+      inventory = await applyKiwiToInventory(query, inventory);
       state.lastInventory = inventory;
       const apiHl =
         applyInventoryToLookup(query, inventory) || buildApiHighlight(query, inventory);
@@ -4668,7 +5469,7 @@ const App = (() => {
       state.lookupBusy = true;
       stopGramHlCycles();
       try {
-        runLocalLookup(query);
+        await runLocalLookup(query);
       } finally {
         state.lookupBusy = false;
       }
@@ -4681,13 +5482,15 @@ const App = (() => {
       return;
     }
 
+    const myToken = ++state.lookupToken;
     state.lookupBusy = true;
+    state.pendingLookupQuery = query;
     stopGramHlCycles();
     const loadingBits = [];
     if (modes.apiGrammar) loadingBits.push("文法點");
     if (modes.apiVocab) loadingBits.push("單字原形");
     if (modes.localGrammar) loadingBits.push("本地掃描");
-    box.innerHTML =
+    const loadingHtml =
       `<div class="lookup-result-stack">` +
       sentenceBoardHtml(query, [], null, null, { source: "api", apiLegend: [] }) +
       `<div class="lookup-result-body">
@@ -4697,19 +5500,30 @@ const App = (() => {
             <span class="badge badge-api-fallback">請稍候…</span>
           </div>
           <p class="panel-note">正在處理：${esc(loadingBits.join(" · "))}…</p>
+          <p class="panel-note muted">查詢期間可用 → 或「歷史」查看已查過的句子，不會中斷 API。單字查詢通常十幾秒內回來。</p>
         </section>
       </div></div>`;
+    state.pendingLookupLoadingHtml = loadingHtml;
+    box.innerHTML = loadingHtml;
     bindLookupResultEvents(query, null);
     syncAppHeaderHeight();
+    updateBackgroundLookupBanner();
 
     try {
       const wantApiVocab = Boolean(modes.apiVocab);
       const wantApiGrammar = Boolean(modes.apiGrammar);
+      const skipVocabApi =
+        wantApiVocab &&
+        typeof Storage.estimateVocabBankCoverage === "function" &&
+        (() => {
+          const cov = Storage.estimateVocabBankCoverage(query, []);
+          return cov.total >= 2 && cov.ratio >= 0.85 && cov.hit >= 2;
+        })();
       let inventory;
 
       if (modes.localGrammar) {
         inventory = buildLocalInventory(query);
-        if (wantApiVocab) {
+        if (wantApiVocab && !skipVocabApi) {
           // 本地文法 + API 單字：輕量請求，不帶規則標題
           const apiInv =
             typeof AiService.inventoryVocabOnly === "function"
@@ -4717,18 +5531,31 @@ const App = (() => {
               : await AiService.inventoryGrammar(query, []);
           inventory.vocab = Array.isArray(apiInv.vocab) ? apiInv.vocab : [];
           if (apiInv.translation) inventory.translation = apiInv.translation;
-          if (apiInv.summary) {
-            inventory.summary = `${inventory.summary || ""} · API 單字 ${inventory.vocab.length}`.trim();
-          } else {
-            inventory.summary = `${inventory.summary || ""} · API 單字 ${inventory.vocab.length}`.trim();
-          }
+          inventory.summary = `${inventory.summary || ""} · API 單字 ${inventory.vocab.length}`.trim();
+        } else if (wantApiVocab && skipVocabApi) {
+          inventory.vocab = [];
+          inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API）`.trim();
         }
       } else if (wantApiGrammar) {
         const titles = RulesService.getAll().map((r) => r.title);
         inventory = await AiService.inventoryGrammar(query, titles);
         inventory.mode = "api";
         inventory.source = "api";
-        if (!wantApiVocab) inventory.vocab = [];
+        if (!wantApiVocab || skipVocabApi) {
+          inventory.vocab = [];
+          if (skipVocabApi) {
+            inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API 單字）`.trim();
+          }
+        }
+      } else if (wantApiVocab && skipVocabApi) {
+        inventory = {
+          summary: "本地單字庫（略過 API）",
+          translation: "",
+          items: [],
+          vocab: [],
+          mode: "local-bank",
+          source: "local-bank",
+        };
       } else if (wantApiVocab) {
         inventory =
           typeof AiService.inventoryVocabOnly === "function"
@@ -4743,12 +5570,51 @@ const App = (() => {
         inventory = { summary: "", translation: "", items: [], vocab: [], mode: "api", source: "api" };
       }
 
-      state.lastInventory = inventory;
-      const apiHl = applyInventoryToLookup(query, inventory) || buildApiHighlight(query, inventory);
-      persistLookupResult(query, inventory, apiHl);
+      inventory = await applyKiwiToInventory(query, inventory);
+
+      const stillMine = myToken === state.lookupToken;
+      const stillViewing = stillMine && isViewingLookupQuery(query);
+      const activePid = Storage.getActiveProjectId();
+      const vocabNote = inventory.vocab?.length ? ` · 詞彙 ${inventory.vocab.length}` : "";
+
+      if (stillViewing) {
+        state.lastInventory = inventory;
+        const apiHl =
+          applyInventoryToLookup(query, inventory) || buildApiHighlight(query, inventory);
+        persistLookupResult(query, inventory, apiHl);
+        const nVocab = (inventory.vocab || []).length;
+        const nItems = (inventory.items || []).length;
+        if (wantApiVocab && !wantApiGrammar && !modes.localGrammar) {
+          showToast(
+            nVocab ? `單字查詢完成：${nVocab} 詞` : "API 未回傳單字，請再試一次或選字手動解釋",
+            nVocab ? "success" : "info"
+          );
+        } else if (!Storage.getActiveProjectId()) {
+          showToast(
+            `查詢完成${nItems ? ` · 文法 ${nItems}` : ""}${nVocab ? ` · 單字 ${nVocab}` : ""}`,
+            "success"
+          );
+        }
+      } else {
+        // 使用者已切到其他已查過句子：只寫入儲存，不覆寫畫面
+        const apiHl = buildApiHighlight(query, inventory);
+        persistLookupResult(query, inventory, apiHl, {
+          silent: true,
+          keepCursor: true,
+        });
+        if (stillMine) {
+          const where = activePid ? "專案" : "歷史";
+          showToast(
+            `「${truncateQueryPreview(query)}」查詢完成，已存入${where}${vocabNote}`,
+            "success"
+          );
+        }
+      }
     } catch (err) {
-      const slot = $("#api-inventory-slot");
-      const errHtml = `
+      const stillMine = myToken === state.lookupToken;
+      if (stillMine && isViewingLookupQuery(query)) {
+        const slot = $("#api-inventory-slot");
+        const errHtml = `
           <section class="panel">
             <div class="result-banner error" style="margin:0">
               <strong>查詢失敗</strong>
@@ -4756,11 +5622,14 @@ const App = (() => {
               <span class="muted">可在查詢頁上方改為僅本地文法排查。</span>
             </div>
           </section>`;
-      if (slot) slot.outerHTML = errHtml;
-      else box.insertAdjacentHTML("beforeend", errHtml);
-      showToast(err.message || "API 失敗", "error");
+        if (slot) slot.outerHTML = errHtml;
+        else box.insertAdjacentHTML("beforeend", errHtml);
+      }
+      if (stillMine) {
+        showToast(err.message || "API 失敗", "error");
+      }
     } finally {
-      state.lookupBusy = false;
+      clearPendingLookup(myToken);
     }
   }
 
@@ -4839,6 +5708,105 @@ const App = (() => {
     showToast("已重設種子", "success");
   }
 
+  function renderVocabBankList() {
+    const box = $("#vocab-bank-list");
+    const countEl = $("#vocab-bank-count");
+    if (!box) return;
+    const filterQ = String($("#vocab-bank-filter")?.value || "").trim();
+    const list =
+      typeof Storage.listVocabBankEntries === "function"
+        ? Storage.listVocabBankEntries(filterQ)
+        : [];
+    if (countEl) {
+      countEl.textContent = filterQ
+        ? `篩選後 ${list.length} 筆 · 本地單字會自動套用到新句子`
+        : `共 ${list.length} 筆 · 手改會寫入詞庫；多義可設主要義或刪義項`;
+    }
+    if (!list.length) {
+      box.innerHTML = `<div class="empty-state"><p>${
+        filterQ
+          ? "沒有符合的單字。"
+          : "單字本還是空的。<br/>查詢並編輯單字後會自動累積；或先做一次 API 單字查詢。"
+      }</p></div>`;
+      return;
+    }
+    box.innerHTML = `<ul class="vocab-bank-list">${list
+      .map((e) => {
+        const senses = Array.isArray(e.senses) ? e.senses : [];
+        const senseHtml = senses
+          .map((s) => {
+            const isP = s.id === e.primarySenseId;
+            return `<li class="vocab-bank-sense${isP ? " is-primary" : ""}">
+              <span class="vocab-bank-sense-gloss">${esc(s.gloss || "（無意思）")}</span>
+              ${s.lemma ? `<span class="muted"> · ${esc(s.lemma)}</span>` : ""}
+              ${isP ? `<span class="badge badge-local">主要</span>` : ""}
+              <span class="vocab-bank-sense-actions">
+                ${
+                  !isP
+                    ? `<button type="button" class="btn btn-sm btn-ghost" data-vb-primary="${esc(
+                        e.key
+                      )}" data-sense-id="${esc(s.id)}">設為主要</button>`
+                    : ""
+                }
+                <button type="button" class="btn btn-sm btn-danger-ghost" data-vb-del-sense="${esc(
+                  e.key
+                )}" data-sense-id="${esc(s.id)}">刪義項</button>
+              </span>
+            </li>`;
+          })
+          .join("");
+        return `<li class="vocab-bank-item" data-key="${esc(e.key)}">
+          <div class="vocab-bank-main">
+            <p class="vocab-bank-surface">${esc(e.surface || e.key)}${
+              e.senseCount > 1
+                ? `<span class="badge badge-api-fallback">${e.senseCount} 義</span>`
+                : ""
+            }</p>
+            <p class="vocab-bank-meta muted">${e.lemma ? `原形 ${esc(e.lemma)} · ` : ""}${
+              e.pos ? esc(e.pos) : ""
+            }</p>
+            <p class="vocab-bank-gloss">${esc(e.gloss || "—")}</p>
+            ${senses.length > 1 ? `<ul class="vocab-bank-senses">${senseHtml}</ul>` : ""}
+          </div>
+          <div class="vocab-bank-actions">
+            <button type="button" class="btn btn-sm btn-danger-ghost" data-vb-delete="${esc(
+              e.key
+            )}">刪除詞</button>
+          </div>
+        </li>`;
+      })
+      .join("")}</ul>`;
+    box.querySelectorAll("[data-vb-delete]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.vbDelete;
+        if (!key || !confirm(`刪除「${key}」及其所有義項？`)) return;
+        Storage.removeVocabBankEntry(key);
+        renderVocabBankList();
+        showToast("已刪除單字", "info");
+      });
+    });
+    box.querySelectorAll("[data-vb-del-sense]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.vbDelSense;
+        const sid = btn.dataset.senseId;
+        if (!key || !sid) return;
+        Storage.removeVocabBankSense(key, sid);
+        renderVocabBankList();
+        showToast("已刪除義項", "info");
+      });
+    });
+    box.querySelectorAll("[data-vb-primary]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.vbPrimary;
+        const sid = btn.dataset.senseId;
+        if (!key || !sid) return;
+        Storage.setVocabBankPrimarySense(key, sid);
+        renderVocabBankList();
+        showToast("已設為主要義項", "success");
+      });
+    });
+  }
+
   function bindEvents() {
     $$(".nav-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -4867,9 +5835,11 @@ const App = (() => {
     });
     $("#lookup-input")?.addEventListener("input", () => {
       if (isProjectMode()) updateProjectModeUI();
+      if (state.lookupBusy) updateBackgroundLookupBanner();
     });
 
     $("#btn-new-rule")?.addEventListener("click", () => openForm());
+    $("#vocab-bank-filter")?.addEventListener("input", () => renderVocabBankList());
     $("#rule-form")?.addEventListener("submit", saveForm);
     $("#btn-form-cancel")?.addEventListener("click", () => {
       // AI 進行中：不清草稿，回原頁（表單欄位與 job 身分保留）
@@ -4907,6 +5877,15 @@ const App = (() => {
     });
     $("#btn-project-leave")?.addEventListener("click", () => leaveProject());
     $("#btn-project-entries")?.addEventListener("click", () => openProjectEntriesModal());
+    $("#project-bulk-input")?.addEventListener("input", () => updateBulkImportHint());
+    $("#btn-project-bulk-run")?.addEventListener("click", () => runProjectBulkImport());
+    $("#btn-project-bulk-cancel")?.addEventListener("click", () => cancelProjectBulkImport());
+    $("#btn-project-bulk-clear")?.addEventListener("click", () => {
+      const ta = $("#project-bulk-input");
+      if (ta) ta.value = "";
+      updateBulkImportHint();
+      ta?.focus();
+    });
     $("#btn-project-entries-modal-close")?.addEventListener("click", () =>
       closeProjectEntriesModal()
     );
@@ -5025,6 +6004,7 @@ const App = (() => {
     $("#settings-mode-api-vocab")?.addEventListener("change", () =>
       onLookupModeToggle("apiVocab")
     );
+    $("#settings-kiwi-enabled")?.addEventListener("change", () => onKiwiToggle());
     $("#btn-settings-modes-all")?.addEventListener("click", () => onSettingsModesAllClick());
     $("#btn-test-api")?.addEventListener("click", () => testApiConnection());
     $("#btn-clear-key")?.addEventListener("click", () => clearApiKey());
@@ -5062,6 +6042,14 @@ const App = (() => {
     } catch {
       RulesService.setAll([]);
     }
+    try {
+      if (typeof Storage.harvestVocabBankFromSnapshots === "function") {
+        const n = Storage.harvestVocabBankFromSnapshots();
+        if (n > 0) console.info(`[vocab-bank] harvested ${n} entries`);
+      }
+    } catch (err) {
+      console.warn("[vocab-bank] harvest failed", err);
+    }
     updateRuleCount();
     updateLookupModeUI();
     // 還原上次進入的專案（若仍存在）
@@ -5074,6 +6062,11 @@ const App = (() => {
     setView("lookup");
     // 版面穩定後再量一次
     requestAnimationFrame(() => syncAppHeaderHeight());
+    if (typeof KiwiService !== "undefined") {
+      KiwiService.onStatus(() => updateKiwiStatusUI());
+      updateKiwiStatusUI();
+      KiwiService.warmup();
+    }
   }
 
   return { init, setView, runLookup };

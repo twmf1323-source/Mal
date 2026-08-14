@@ -35,6 +35,7 @@ const RulesService = (() => {
   /** 種子檔順序（同分類內維持此序；母音縮約 해→여→돼 接在 ㅡ 脫落之後） */
   const SEED_ID_ORDER = [
     "seed-haeyo",
+    "seed-haeche",
     "seed-hamnida",
     "seed-past",
     "seed-topic",
@@ -1590,6 +1591,15 @@ const RulesService = (() => {
         if (s) needles.add(s);
       }
     }
+    if (Array.isArray(rule.keywords)) {
+      for (const kw of rule.keywords) {
+        for (const n of expandNeedles(kw)) {
+          const stripped = String(n).replace(/^[-~〜～─–—\s]+/, "").trim();
+          if (stripped) needles.add(stripped);
+          needles.add(n);
+        }
+      }
+    }
     // 命令／請托 -아/어 주다：標題常寫「-아/어 줘」抽象式，句中是 줘／주세요
     const blob = [rule.title, rule.structure, rule.explanation || ""].join("\n");
     if (
@@ -2470,11 +2480,11 @@ const RulesService = (() => {
       owned.owned && owned.rule
         ? owned.rule
         : /主格|이\s*\/\s*가|이\/가/.test(itemBlob)
-          ? { title: "主格助詞（이/가）", category: "助詞" }
+          ? { title: "主格（이/가）", category: "助詞" }
           : /賓格|을\s*\/\s*를|을\/를/.test(itemBlob)
-            ? { title: "賓格助詞（을/를）", category: "助詞" }
+            ? { title: "賓格（을/를）", category: "助詞" }
             : /主題|은\s*\/\s*는|은\/는/.test(itemBlob)
-              ? { title: "主題助詞（은/는）", category: "助詞" }
+              ? { title: "主題（은/는）", category: "助詞" }
               : /限定|만|only/i.test(itemBlob) && /助詞|보조사|한정/.test(itemBlob)
                 ? { title: "限定助詞（만）", category: "助詞" }
                 : /冠形|관형|定語/.test(itemBlob)
@@ -3177,7 +3187,7 @@ const RulesService = (() => {
 
       if (!already) {
         const rule = findAjueoJudaRule();
-        const title = rule?.title || "命令／請托（-아/어 줘）";
+        const title = rule?.title || "請托（-아/어 줘）";
         const p = parseBilingualTitle(title);
         const row = {
           name: title,
@@ -3244,6 +3254,21 @@ const RulesService = (() => {
         reason: `表面像母音縮約（${want}）`,
       });
     }
+    // 詞尾 ㄴ받침：選 예쁜／큰 時推冠形（Kiwi 未就緒時的後備）
+    const lastCh = sel[sel.length - 1];
+    if (lastCh && hasNieunBatchim(lastCh) && lastCh !== "은") {
+      surfaceBoosts.push({
+        test: (r) => {
+          const blob = [r.title, r.structure, r.explanation || ""].join("\n");
+          return /冠形|관형|定語/.test(blob) && /ㄴ|은/.test(r.title || "");
+        },
+        score: 24,
+        reason: "詞尾 ㄴ받침 → 冠形 -ㄴ/은",
+      });
+    }
+
+    const kiwiHints = Array.isArray(opts.kiwiHints) ? opts.kiwiHints : [];
+
     // 常見單／雙字助詞、語尾
     const PARTICLE_HINTS = [
       { re: /^(은|는)$/, titleRe: /主題|은\s*\/\s*는|은\/는/, reason: "主題助詞表面" },
@@ -3350,6 +3375,16 @@ const RulesService = (() => {
         }
       }
 
+      if (kiwiHints.length && typeof KiwiService !== "undefined" && KiwiService.ruleMatchesHint) {
+        for (const hint of kiwiHints) {
+          if (KiwiService.ruleMatchesHint(rule, hint)) {
+            score += Number(hint.score) || 32;
+            reasons.push(hint.reason || "形態素分析");
+            break;
+          }
+        }
+      }
+
       // 結構式零件
       if (rule.structure && sel.length >= 1) {
         const parts = String(rule.structure).split(/[＋+\s→／|,，()（）]+/);
@@ -3374,7 +3409,32 @@ const RulesService = (() => {
 
     scored.sort((a, b) => b.score - a.score || String(a.rule.title).localeCompare(String(b.rule.title), "zh-Hant"));
 
-    const suggestions = scored.filter((s) => s.score >= minScore).slice(0, maxSuggest);
+    let suggestions = scored.filter((s) => s.score >= minScore).slice(0, maxSuggest);
+
+    // 沒有高分建議時：把 해체（반말）浮上建議區（語體後備，便於套用半말）
+    if (suggestions.length === 0) {
+      const haeche =
+        all.find((r) => r && r.id === "seed-haeche") ||
+        all.find((r) => {
+          const t = String(r?.title || "");
+          // 使用者自建「해체（반말）」等標題也能當後備
+          return /해체/.test(t) || (/반말/.test(t) && !/해요|합니다|합쇼/.test(t));
+        });
+      if (haeche) {
+        const prior = scored.find((s) => s.rule.id === haeche.id);
+        suggestions = [
+          {
+            rule: haeche,
+            score: prior && prior.score > 0 ? prior.score : Math.max(1, minScore),
+            reasons:
+              prior?.reasons?.length > 0
+                ? prior.reasons
+                : ["無高分命中 · 語體後備（해체／반말）"],
+          },
+        ];
+      }
+    }
+
     const suggestIds = new Set(suggestions.map((s) => s.rule.id));
     const rest = all.filter((r) => !suggestIds.has(r.id));
 

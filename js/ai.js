@@ -7,10 +7,10 @@ const AiService = (() => {
   const RULE_SYSTEM = `你是韓語文法助教。依「規則名」產出筆記本卡片 JSON（不要 markdown／圍欄／其他文字）。
 
 短鍵格式（必須用短鍵，勿用 title/category 等長鍵）：
-{"n":"中文（韓語）","c":"語尾|助詞|不規則|時態|敬語|連接|句型|其他","e":"繁中說明2–5句","s":"結構式 詞幹＋…"}
+{"n":"極短中文用法名（韓語標記）","c":"語尾|助詞|不規則|時態|敬語|連接|句型|其他","e":"繁中說明2–5句","s":"結構式 詞幹＋…"}
 
 規則：
-1. n 必須「中文（韓語）」，如 해요體（-아/어요）、主格助詞（이/가）。
+1. n 必須「極短中文用法名（韓語標記）」，全形括號。標準例：**禁止（-지 마）**、해요體（-아/어요）、主格（이/가）。中文極短；括號內只寫韓語標記。禁止長句標題。
 2. 無變化格子、keywords。不規則獨立概念；通則可在 e 提「例外見 ○○ 不規則」。
 3. e 只寫用法，盡量無例句。
 4. s 必填：＋ 連零件；→ 結果；開/閉音節同一卡用全形／分列，**開在前閉在後**。
@@ -27,7 +27,7 @@ const AiService = (() => {
   "u": "摘要可空",
   "t": "整句繁中翻譯（必填）",
   "i": [
-    {"n":"中文（韓語）","c":"語尾|助詞|不規則|時態|敬語|連接|句型|其他","s":"句中片段","f":"h|m|l"}
+    {"n":"極短中文用法名（韓語標記）","c":"語尾|助詞|不規則|時態|敬語|連接|句型|其他","s":"句中片段","f":"h|m|l"}
   ],
   "v": [
     {"s":"句中表面形","l":"詞典原形","g":"簡短中文義","p":"動詞|形容詞|名詞|副詞|代詞|數詞|其他","a":0,"b":2}
@@ -39,7 +39,7 @@ const AiService = (() => {
 z/k（nameZh/nameKo）可省略（前端從 n 拆）。
 
 文法 i：
-1. n 格式 中文（韓語），如 過去（-았/었-）。通則與不規則分開。
+1. n 格式「極短中文用法名（韓語標記）」，全形括號。如 **禁止（-지 마）**、過去（-았/었-）。通則與不規則分開。中文極短。
 2. 只列值得建卡的點；已有本地規則也可列。**若 user 訊息附了「本地已有規則標題」且語意相同，n 必須逐字抄本地標題**（勿改成 過去式／連接語尾 等別名，否則前端會誤判未收錄）。
 3. 不要在 i 寫用法長文／翻譯；建立規則只用名稱。
 4. 一次一主題；縮約只報句中那一個（난≠날）。
@@ -57,14 +57,14 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
    - 僅當 되→돼 系（돼요／됐다…）才可列 n:"母音縮約（되＋어→돼）"。
    - **여＋줘 連寫必雙報**（極重要）：속삭여줘、알려줘（알리＋어→여）、가르쳐줘 等＝前面 **이＋어→여** ＋後面 **請托 줘**。i 必須**兩項都列**：
      - n:"母音縮約（이＋어→여）"，s:"속삭여" 或 "여"（須 indexOf 能命中原文）
-     - n:"命令／請托（-아/어 줘）"，s:"줘"
+     - n:"請托（-아/어 줘）"，s:"줘"
      不可只報 줘 而省略 여 縮約。
    - **해＋줘**：해줘／해 줘 → 可同時列 母音縮約（하＋여→해）s:"해" 與 請托 s:"줘"。
    - **禁止**：句中無 해／해요／했 等卻標 하＋여→해；單純 감싸줘（無 여／해 縮約）只報請托即可；부드럽게 的 -게 不是母音縮約。
    - 三系各列各卡；勿只寫「母音縮約」或舊式「母音縮約（해）」；勿用 해요體 冒充；해／여／돼 不可互換。
 7c. **命令／請托（-아/어 줘）— 有 줘／주세요 就必須列（不可漏）**：
    - 句中只要出現 **줘／줘요／주세요／주실래요**（含 속삭여줘、감싸줘、해 줘、도와줘 連寫），i **必須**有一項：
-     n:"命令／請托（-아/어 줘）"（若本地標題表有此名則**逐字抄**），s:"줘" 或 "주세요" 等最短可見表面。
+     n:"請托（-아/어 줘）"（若本地標題表有此名則**逐字抄**），s:"줘" 或 "주세요" 等最短可見表面。
    - **禁止**：只報母音縮約／해요體／動詞原形而**省略**請托；여＋줘、해＋줘 都是「縮約＋請托」兩項，不是二選一。
    - 勿把 줘 標成母音縮約（하＋여→해）或只寫「命令（-아/어）」而不提 줘。
 
@@ -86,7 +86,7 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
    句中實際用到哪一種就只列那一種；多種並用就**各列一項**，不可合成一條「不規則」。
 14. ㅡ 탈락：s 用融合後表面（커、써、커요），不要填 ㅡ／으。
 15. 可同時列 해요體／過去等，但具體不規則名不可省略、不可用統稱代替。
-16. 句型「值得／還可以」寫 n:"值得／還可以（-(으)ㄹ 만하다）"，s 填句中「만하／만해／을 만…」可見片段。`;
+16. 句型「值得」寫 n:"值得（-ㄹ 만하다）"，s 填句中「만하／만해／을 만…」可見片段。`;
 
   function getConfig() {
     const s = Storage.loadSettings();
@@ -283,10 +283,12 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
       })
       .filter(Boolean);
 
-    const rawVocab = Array.isArray(raw.v)
-      ? raw.v
-      : Array.isArray(raw.vocab)
-        ? raw.vocab
+    const rawVocabSrc =
+      raw.v ?? raw.vocab ?? raw.words ?? raw.vocabulary ?? raw.lexicon ?? null;
+    const rawVocab = Array.isArray(rawVocabSrc)
+      ? rawVocabSrc
+      : rawVocabSrc && typeof rawVocabSrc === "object"
+        ? [rawVocabSrc]
         : [];
 
     const vocab = rawVocab
@@ -314,30 +316,87 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
     return { summary, translation, items, vocab };
   }
 
-  async function chatComplete({ messages, temperature = 0.3 }) {
+  function isReasoningModel(model) {
+    const m = String(model || "").toLowerCase();
+    if (!m || /non-reasoning/.test(m)) return false;
+    return /grok-4(\.|-|$)/.test(m);
+  }
+
+  function messageContentToText(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    const raw = msg.content;
+    if (typeof raw === "string" && raw.trim()) return raw;
+    if (Array.isArray(raw)) {
+      const joined = raw
+        .map((p) => {
+          if (typeof p === "string") return p;
+          if (!p || typeof p !== "object") return "";
+          return p.text || p.content || p.output_text || "";
+        })
+        .filter(Boolean)
+        .join("");
+      if (joined.trim()) return joined;
+    }
+    const alt = msg.reasoning_content || msg.output_text || "";
+    return String(alt || "").trim();
+  }
+
+  async function chatComplete({ messages, temperature = 0.3, json = false }) {
     const { apiKey, baseUrl, model } = getConfig();
     if (!apiKey) {
       throw new Error("尚未設定 API Key，請先到「設定」填入");
     }
 
     const url = `${baseUrl}/chat/completions`;
+    const extras = {};
+    if (isReasoningModel(model)) extras.reasoning_effort = "low";
+    if (json) extras.response_format = { type: "json_object" };
+
+    async function post(extra) {
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 120000) : null;
+      try {
+        return await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature,
+            stream: false,
+            ...extra,
+          }),
+          signal: ctrl?.signal,
+        });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
     let res;
     try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature,
-          stream: false,
-        }),
-      });
+      res = await post(extras);
+      if (res.status === 400 && Object.keys(extras).length) {
+        const preview = await res.text();
+        if (/reasoning_effort|response_format|unknown|unsupported|unrecognized|invalid/i.test(preview)) {
+          res = await post({});
+        } else {
+          res = {
+            ok: false,
+            status: 400,
+            statusText: "Bad Request",
+            text: async () => preview,
+          };
+        }
+      }
     } catch (err) {
       const msg = err?.message || String(err);
+      if (err?.name === "AbortError" || /aborted|timeout/i.test(msg)) {
+        throw new Error("API 逾時（超過 2 分鐘）。請再試一次，或到設定把推理較重的模型改成較快的。");
+      }
       if (/Failed to fetch|NetworkError|CORS/i.test(msg)) {
         throw new Error(
           "無法連線 API（可能是網路或瀏覽器 CORS）。請確認 Base URL 與金鑰。"
@@ -358,7 +417,7 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
       const detail =
         body?.error?.message ||
         body?.message ||
-        body?.error ||
+        (typeof body?.error === "string" ? body.error : "") ||
         bodyText?.slice(0, 200) ||
         res.statusText;
       if (res.status === 401 || res.status === 403) {
@@ -367,9 +426,9 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
       throw new Error(`API 錯誤 ${res.status}：${detail}`);
     }
 
-    const content = body?.choices?.[0]?.message?.content;
+    const content = messageContentToText(body?.choices?.[0]?.message);
     if (!content) {
-      throw new Error("API 回傳沒有內容");
+      throw new Error("API 回傳沒有內容（推理模型可能尚未產出正文，請再試一次）");
     }
     return content;
   }
@@ -383,10 +442,11 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
         { role: "system", content: RULE_SYSTEM },
         {
           role: "user",
-          content: `規則名：${t}\n\n請輸出短鍵 JSON：n/c/e/s。n 用「中文（韓語）」；e 無例句；s 必填。一次一主題。開/閉音節同卡時開在前、全形／分隔。`,
+          content: `規則名：${t}\n\n請輸出短鍵 JSON：n/c/e/s。n 必須「極短中文用法名（韓語標記）」，如 禁止（-지 마）。e 無例句；s 必填。一次一主題。開/閉音節同卡時開在前、全形／分隔。`,
         },
       ],
       temperature: 0.25,
+      json: true,
     });
 
     const parsed = extractJson(content);
@@ -426,6 +486,7 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
         },
       ],
       temperature: 0.2,
+      json: true,
     });
 
     const parsed = extractJson(content);
@@ -450,15 +511,19 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
         { role: "system", content: VOCAB_ONLY_SYSTEM },
         {
           role: "user",
-          content: `查詢內容：\n${q}\n\n只輸出 u/t/v（禁止 i）。動詞／形容詞 l 用 -다 詞典形。`,
+          content: `查詢內容：\n${q}\n\n只輸出 u/t/v（禁止 i）。v 必填、不可空陣列。動詞／形容詞 l 用 -다 詞典形。`,
         },
       ],
       temperature: 0.2,
+      json: true,
     });
 
     const inv = normalizeInventory(extractJson(content));
     inv.items = [];
     if (!inv.summary) inv.summary = `API 單字：${(inv.vocab || []).length} 詞`;
+    if (!(inv.vocab || []).length && !inv.translation) {
+      throw new Error("API 沒有回傳單字資料，請再試一次");
+    }
     return inv;
   }
 
@@ -487,6 +552,7 @@ p 必須完整中文詞性。`,
         },
       ],
       temperature: 0.2,
+      json: true,
     });
     const parsed = extractJson(content);
     const raw =

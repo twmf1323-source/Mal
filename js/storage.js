@@ -12,6 +12,9 @@ const Storage = (() => {
   const HISTORY_MAX = 40;
   const PROJECTS_KEY = "kgn_projects_v1";
   const ACTIVE_PROJECT_KEY = "kgn_active_project_v1";
+  const VOCAB_BANK_KEY = "kgn_vocab_bank_v1";
+  const VOCAB_BANK_MAX = 5000;
+  const VOCAB_BANK_FIELDS = ["surface", "lemma", "gloss", "pos"];
 
   /** 文法結構可視化配色（與 CSS data-structure-theme 對應） */
   const STRUCTURE_THEMES = [
@@ -38,6 +41,7 @@ const Storage = (() => {
     baseUrl: "https://api.x.ai/v1",
     model: "grok-4.5",
     structureTheme: "indigo",
+    kiwiEnabled: true,
     lookupModes: { ...DEFAULT_LOOKUP_MODES },
   };
 
@@ -225,6 +229,7 @@ const Storage = (() => {
     if (!Array.isArray(rules) || rules.length < 2) return { rules, changed: false };
     const SEED_ID_ORDER = [
       "seed-haeyo",
+      "seed-haeche",
       "seed-hamnida",
       "seed-past",
       "seed-topic",
@@ -294,20 +299,59 @@ const Storage = (() => {
     return { rules: next, changed: before !== after };
   }
 
-  /** 補上本機尚未有的種子卡（例如新加的 命令／請托） */
+  const TITLE_RENAMES = {
+    "해요體（-아/어요）": "禮貌體（-아/어요）",
+    "해체（반말）": "平語（해체）",
+    "합니다體（-습니다）": "正式體（-습니다）",
+    "主題助詞（은/는）": "主題（은/는）",
+    "主格助詞（이/가）": "主格（이/가）",
+    "比喻接尾（듯이）": "比喻（듯이）",
+    "賓格助詞（을/를）": "賓格（을/를）",
+    "時間地點助詞（에）": "時間地點（에）",
+    "處所來源助詞（에서）": "處所來源（에서）",
+    "背景對比連結・動詞（-는데）": "背景對比（-는데）",
+    "背景對比連結・形容詞（-ㄴ/은데）": "背景對比（-ㄴ/은데）",
+    "背景對比連結・名詞（-ㄴ데/인데）": "背景對比（-ㄴ데/인데）",
+    "指定詞해요體（이에요/예요）": "指定（이에요/예요）",
+    "值得／還可以（-(으)ㄹ 만하다）": "值得（-ㄹ 만하다）",
+    "命令／請托（-아/어 줘）": "請托（-아/어 줘）",
+  };
+
+  function migrateRuleTitles(rules) {
+    if (!Array.isArray(rules)) return { rules: [], changed: false };
+    let changed = false;
+    const next = rules.map((r) => {
+      if (!r) return r;
+      const t = String(r.title || "").trim();
+      const mapped = TITLE_RENAMES[t];
+      if (!mapped || mapped === t) return r;
+      changed = true;
+      return { ...r, title: mapped };
+    });
+    return { rules: next, changed };
+  }
+
+  /** 補上本機尚未有的種子卡（例如新加的 請托、平語） */
   function ensureMissingSeedRules(rules, seedList) {
     if (!Array.isArray(rules)) return { rules: [], changed: false };
     if (!Array.isArray(seedList) || !seedList.length) return { rules, changed: false };
     const byId = new Map(rules.filter((r) => r && r.id).map((r) => [r.id, r]));
+    const titles = new Set(
+      [...byId.values()].map((r) => String(r?.title || "").trim()).filter(Boolean)
+    );
     let changed = false;
     for (const s of seedList) {
       if (!s || !s.id) continue;
       if (byId.has(s.id)) continue;
+      // 使用者已自建同標題時不重複插入（例如已有 해체（반말））
+      const seedTitle = String(s.title || "").trim();
+      if (seedTitle && titles.has(seedTitle)) continue;
       byId.set(s.id, {
         ...s,
         created_at: s.created_at || SEED_EPOCH,
         updated_at: s.updated_at || s.created_at || SEED_EPOCH,
       });
+      if (seedTitle) titles.add(seedTitle);
       changed = true;
     }
     return { rules: Array.from(byId.values()), changed };
@@ -334,6 +378,9 @@ const Storage = (() => {
       const mig = migrateVowelContractionSeeds(next);
       next = mig.rules;
       changed = mig.changed || changed;
+      const titleMig = migrateRuleTitles(next);
+      next = titleMig.rules;
+      changed = titleMig.changed || changed;
 
       const meta = getMeta();
       if (mig.changed && !meta.vowelScopeTitleV1At) {
@@ -539,6 +586,7 @@ const Storage = (() => {
           (typeof parsed?.model === "string" && parsed.model.trim()) ||
           DEFAULT_SETTINGS.model,
         structureTheme: normalizeStructureTheme(parsed?.structureTheme),
+        kiwiEnabled: parsed?.kiwiEnabled !== false,
       };
       base.lookupModes = normalizeLookupModes(
         parsed && typeof parsed === "object" ? parsed.lookupModes : null
@@ -558,6 +606,7 @@ const Storage = (() => {
     next.baseUrl = String(next.baseUrl || DEFAULT_SETTINGS.baseUrl).trim().replace(/\/+$/, "");
     next.model = String(next.model || DEFAULT_SETTINGS.model).trim();
     next.structureTheme = normalizeStructureTheme(next.structureTheme);
+    next.kiwiEnabled = next.kiwiEnabled !== false;
     if (partial && Object.prototype.hasOwnProperty.call(partial, "lookupModes")) {
       next.lookupModes = normalizeLookupModes(partial.lookupModes);
     } else {
@@ -683,6 +732,483 @@ const Storage = (() => {
         end: Number.isFinite(w?.end) ? w.end : w?.end == null ? null : Number(w.end),
       }))
       .filter((w) => w.surface || w.lemma);
+  }
+
+  /* —— 全域單字庫（跨句複用） —— */
+
+  function normVocabBankKey(s) {
+    return String(s || "")
+      .trim()
+      .normalize("NFC");
+  }
+
+  const SENSE_KEYS = VOCAB_BANK_FIELDS.filter((k) => k !== "surface");
+
+  function senseHasPayload(sense) {
+    if (!sense) return false;
+    return SENSE_KEYS.some((k) => String(sense[k] || "").trim());
+  }
+
+  function pickSenseFields(src) {
+    const out = {};
+    for (const k of SENSE_KEYS) out[k] = String(src?.[k] || "").trim();
+    return out;
+  }
+
+  function vocabBankHasPayload(row) {
+    if (!row) return false;
+    if (Array.isArray(row.senses) && row.senses.some(senseHasPayload)) return true;
+    if (Array.isArray(row.alts) && row.alts.some(senseHasPayload)) return true;
+    return SENSE_KEYS.some((k) => String(row[k] || "").trim());
+  }
+
+  function getPrimarySense(entry) {
+    if (!entry) return null;
+    const senses = Array.isArray(entry.senses) ? entry.senses : [];
+    if (!senses.length) return null;
+    const pid = entry.primarySenseId;
+    return senses.find((s) => s && s.id === pid) || senses[0];
+  }
+
+  /** 扁平舊資料／alts → senses；同步主要義到頂層欄位 */
+  function ensureBankEntrySenses(entry) {
+    if (!entry || !(entry.surface || entry.lemma)) return entry;
+    let senses = Array.isArray(entry.senses) ? entry.senses.filter(Boolean) : [];
+    if (!senses.length) {
+      const primary = {
+        id: entry.primarySenseId || "primary",
+        ...pickSenseFields(entry),
+        updatedAt: entry.updatedAt || new Date().toISOString(),
+      };
+      if (senseHasPayload(primary)) senses = [primary];
+    }
+    (Array.isArray(entry.alts) ? entry.alts : []).forEach((a, i) => {
+      if (!senseHasPayload(a)) return;
+      const gloss = String(a.gloss || "").trim();
+      const lemma = String(a.lemma || "").trim();
+      const exists = senses.some(
+        (s) => String(s.gloss || "").trim() === gloss && String(s.lemma || "").trim() === lemma
+      );
+      if (exists) return;
+      senses.push({
+        id: a.id || `alt-${i}`,
+        ...pickSenseFields(a),
+        updatedAt: a.updatedAt || entry.updatedAt || new Date().toISOString(),
+      });
+    });
+    if (!senses.length) return entry;
+    delete entry.alts;
+    if (!entry.primarySenseId || !senses.some((s) => s.id === entry.primarySenseId)) {
+      entry.primarySenseId = senses[0].id;
+    }
+    entry.senses = senses;
+    const p = getPrimarySense(entry);
+    if (p) {
+      for (const k of SENSE_KEYS) entry[k] = p[k] || "";
+      entry.updatedAt = p.updatedAt || entry.updatedAt;
+    }
+    return entry;
+  }
+
+  function flattenBankHit(entry) {
+    if (!entry) return null;
+    const e = ensureBankEntrySenses({
+      ...entry,
+      senses: (entry.senses || []).map((s) => ({ ...s })),
+      alts: (entry.alts || []).map((a) => ({ ...a })),
+    });
+    if (!vocabBankHasPayload(e)) return null;
+    const primary = getPrimarySense(e);
+    const flat = {
+      surface: e.surface,
+      ...pickSenseFields(primary || e),
+      updatedAt: e.updatedAt || primary?.updatedAt || "",
+      primarySenseId: e.primarySenseId,
+      senses: e.senses,
+      bankAlts: (e.senses || [])
+        .filter((s) => s && s.id !== e.primarySenseId)
+        .map((s) => ({ id: s.id, ...pickSenseFields(s) })),
+    };
+    return flat;
+  }
+
+  function rebuildLemmaIndex(bank) {
+    const byLemma = {};
+    for (const [sk, raw] of Object.entries(bank.bySurface || {})) {
+      const row = ensureBankEntrySenses(raw);
+      bank.bySurface[sk] = row;
+      const lemmas = new Set();
+      const pl = normVocabBankKey(row?.lemma);
+      if (pl && pl !== sk) lemmas.add(pl);
+      for (const s of row.senses || []) {
+        const lem = normVocabBankKey(s?.lemma);
+        if (lem && lem !== sk) lemmas.add(lem);
+      }
+      for (const lem of lemmas) {
+        if (!byLemma[lem]) byLemma[lem] = [];
+        if (!byLemma[lem].includes(sk)) byLemma[lem].push(sk);
+      }
+    }
+    bank.byLemma = byLemma;
+    return bank;
+  }
+
+  function loadVocabBank() {
+    try {
+      const raw = localStorage.getItem(VOCAB_BANK_KEY);
+      if (!raw) return { bySurface: {}, byLemma: {} };
+      const parsed = JSON.parse(raw);
+      const bySurface =
+        parsed?.bySurface && typeof parsed.bySurface === "object"
+          ? parsed.bySurface
+          : {};
+      let byLemma =
+        parsed?.byLemma && typeof parsed.byLemma === "object" ? parsed.byLemma : {};
+      const bank = { bySurface, byLemma };
+      if (Object.keys(bySurface).length && !Object.keys(byLemma).length) {
+        rebuildLemmaIndex(bank);
+      }
+      return bank;
+    } catch {
+      return { bySurface: {}, byLemma: {} };
+    }
+  }
+
+  function pruneVocabBank(bank) {
+    const keys = Object.keys(bank.bySurface || {});
+    if (keys.length <= VOCAB_BANK_MAX) return bank;
+    keys
+      .map((k) => ({ k, at: String(bank.bySurface[k]?.updatedAt || "") }))
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .slice(0, keys.length - VOCAB_BANK_MAX)
+      .forEach(({ k }) => {
+        delete bank.bySurface[k];
+      });
+    rebuildLemmaIndex(bank);
+    return bank;
+  }
+
+  function saveVocabBank(bank) {
+    rebuildLemmaIndex(bank);
+    const next = pruneVocabBank({
+      bySurface: bank?.bySurface && typeof bank.bySurface === "object" ? bank.bySurface : {},
+      byLemma: bank?.byLemma && typeof bank.byLemma === "object" ? bank.byLemma : {},
+    });
+    localStorage.setItem(VOCAB_BANK_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  function findVocabBankHit(bank, surface, lemma) {
+    const bySurface = bank.bySurface || {};
+    const byLemma = bank.byLemma || {};
+    const sk = normVocabBankKey(surface);
+    if (sk && bySurface[sk] && vocabBankHasPayload(bySurface[sk])) {
+      return ensureBankEntrySenses(bySurface[sk]);
+    }
+    const lk = normVocabBankKey(lemma || surface);
+    if (lk && bySurface[lk] && vocabBankHasPayload(bySurface[lk])) {
+      return ensureBankEntrySenses(bySurface[lk]);
+    }
+    if (lk && Array.isArray(byLemma[lk])) {
+      let best = null;
+      for (const id of byLemma[lk]) {
+        const row = bySurface[id];
+        if (!row || !vocabBankHasPayload(row)) continue;
+        const er = ensureBankEntrySenses(row);
+        if (!best || String(er.updatedAt || "") > String(best.updatedAt || "")) best = er;
+      }
+      return best;
+    }
+    return null;
+  }
+
+  function fillVocabRowFromHit(row, hit) {
+    if (!hit) return row;
+    const flat = flattenBankHit(hit);
+    if (!flat) return row;
+    const out = { ...row };
+    for (const k of SENSE_KEYS) {
+      if (!String(out[k] || "").trim() && String(flat[k] || "").trim()) out[k] = flat[k];
+    }
+    if (flat.bankAlts?.length) out.bankAlts = flat.bankAlts;
+    if (!out.fromBank) out.fromBank = true;
+    return out;
+  }
+
+  function upsertVocabBankEntries(list, opts = {}) {
+    const preferIncoming = Boolean(opts.preferIncoming);
+    const bank = loadVocabBank();
+    const now = new Date().toISOString();
+    let n = 0;
+    for (const w of Array.isArray(list) ? list : []) {
+      const surface = normVocabBankKey(w?.surface || w?.lemma);
+      if (!surface) continue;
+      const surfaceDisp = String(w?.surface || w?.lemma || surface).trim();
+      const incoming = pickSenseFields(w);
+      if (!senseHasPayload(incoming)) continue;
+
+      let entry = bank.bySurface[surface]
+        ? ensureBankEntrySenses({ ...bank.bySurface[surface] })
+        : { surface: surfaceDisp, senses: [], primarySenseId: "" };
+
+      entry.surface = surfaceDisp || entry.surface || surface;
+      if (!Array.isArray(entry.senses)) entry.senses = [];
+
+      const sameGloss = entry.senses.find(
+        (s) =>
+          String(s.gloss || "").trim() === incoming.gloss &&
+          String(s.lemma || "").trim() === incoming.lemma
+      );
+
+      if (preferIncoming && incoming.gloss) {
+        if (sameGloss) {
+          Object.assign(sameGloss, { ...incoming, updatedAt: now });
+          entry.primarySenseId = sameGloss.id;
+        } else {
+          const primary = getPrimarySense(entry);
+          const primaryGloss = String(primary?.gloss || "").trim();
+          if (primary && primaryGloss && primaryGloss !== incoming.gloss) {
+            const sense = { id: newId("vs_"), ...incoming, updatedAt: now };
+            entry.senses.push(sense);
+            entry.primarySenseId = sense.id;
+          } else if (primary) {
+            Object.assign(primary, { ...incoming, updatedAt: now });
+            entry.primarySenseId = primary.id;
+          } else {
+            const sense = { id: newId("vs_"), ...incoming, updatedAt: now };
+            entry.senses = [sense];
+            entry.primarySenseId = sense.id;
+          }
+        }
+      } else {
+        let primary = getPrimarySense(entry);
+        if (!primary) {
+          primary = { id: newId("vs_"), ...incoming, updatedAt: now };
+          entry.senses = [primary];
+          entry.primarySenseId = primary.id;
+        } else {
+          for (const k of SENSE_KEYS) {
+            if (!String(primary[k] || "").trim() && incoming[k]) primary[k] = incoming[k];
+          }
+          primary.updatedAt = now;
+        }
+      }
+
+      entry = ensureBankEntrySenses(entry);
+      entry.updatedAt = now;
+      if (!vocabBankHasPayload(entry)) continue;
+      bank.bySurface[surface] = entry;
+      n += 1;
+    }
+    if (n) saveVocabBank(bank);
+    return n;
+  }
+
+  function lookupVocabBank(surfaceOrLemma) {
+    const key = normVocabBankKey(surfaceOrLemma);
+    if (!key) return null;
+    const hit = findVocabBankHit(loadVocabBank(), key, key);
+    return hit ? flattenBankHit(hit) : null;
+  }
+
+  function mergeVocabWithBank(vocabList, queryText, opts = {}) {
+    const bank = loadVocabBank();
+    if (!bank.byLemma || !Object.keys(bank.byLemma).length) rebuildLemmaIndex(bank);
+    const bySurface = bank.bySurface || {};
+    const src = String(queryText || "");
+    const list = Array.isArray(vocabList) ? vocabList.slice() : [];
+    const seen = new Set();
+
+    function enrich(row) {
+      const surf = normVocabBankKey(row?.surface);
+      if (surf) seen.add(surf);
+      const hit = findVocabBankHit(bank, row?.surface, row?.lemma);
+      return hit ? fillVocabRowFromHit(row, hit) : row;
+    }
+
+    const out = list.map(enrich);
+    if (src) {
+      const keys = Object.keys(bySurface)
+        .filter((k) => k.length >= 2 && src.includes(k) && !seen.has(k))
+        .sort((a, b) => b.length - a.length || a.localeCompare(b));
+      let added = 0;
+      for (const k of keys) {
+        if (added >= 40) break;
+        const hit = bySurface[k];
+        if (!hit || !vocabBankHasPayload(hit)) continue;
+        const flat = flattenBankHit(hit) || hit;
+        out.push({
+          surface: hit.surface || k,
+          lemma: flat.lemma || "",
+          gloss: flat.gloss || "",
+          pos: flat.pos || "",
+          bankAlts: flat.bankAlts || [],
+          fromBank: true,
+          source: "local-bank",
+        });
+        seen.add(k);
+        added += 1;
+      }
+    }
+    // API 已給 lemma、句中 surface 不同時：用 lemma 對庫並保留句中 surface
+    const hints = Array.isArray(opts.tokenHints) ? opts.tokenHints : [];
+    let hintAdded = 0;
+    for (const t of hints) {
+      if (hintAdded >= 40) break;
+      const surf = String(t?.surface || "").trim();
+      if (!surf) continue;
+      const sk = normVocabBankKey(surf);
+      if (sk && seen.has(sk)) continue;
+      const hit = findVocabBankHit(bank, surf, t?.lemma);
+      if (!hit || !vocabBankHasPayload(hit)) continue;
+      if (src && !src.includes(surf)) continue;
+      const flat = flattenBankHit(hit) || hit;
+      const row = {
+        surface: surf,
+        lemma: flat.lemma || String(t.lemma || "").trim() || "",
+        gloss: flat.gloss || "",
+        pos: flat.pos || "",
+        bankAlts: flat.bankAlts || [],
+        fromBank: true,
+        source: "local-bank",
+      };
+      const a = Number(t.start);
+      const b = Number(t.end);
+      if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+        row.start = a;
+        row.end = b;
+      }
+      out.push(row);
+      if (sk) seen.add(sk);
+      hintAdded += 1;
+    }
+    return out;
+  }
+
+  function harvestVocabBankFromSnapshots() {
+    const bank = loadVocabBank();
+    if (Object.keys(bank.bySurface || {}).length) return 0;
+    const collected = [];
+    for (const h of loadHistory()) {
+      if (Array.isArray(h?.vocab)) collected.push(...h.vocab);
+    }
+    try {
+      for (const p of listProjects()) {
+        for (const e of p.entries || []) {
+          if (Array.isArray(e?.vocab)) collected.push(...e.vocab);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return upsertVocabBankEntries(collected, { preferIncoming: false });
+  }
+
+  function listVocabBankEntries(filterQ = "") {
+    const bank = loadVocabBank();
+    const q = normVocabBankKey(filterQ).toLowerCase();
+    const rows = Object.entries(bank.bySurface || {})
+      .map(([key, raw]) => {
+        const e = ensureBankEntrySenses({ ...raw });
+        bank.bySurface[key] = e;
+        return { key, entry: e, flat: flattenBankHit(e) };
+      })
+      .filter((r) => r.flat && vocabBankHasPayload(r.entry));
+    let list = rows;
+    if (q) {
+      list = rows.filter(({ entry, flat }) => {
+        const blob = [
+          entry.surface,
+          flat.lemma,
+          flat.gloss,
+          flat.pos,
+          ...(entry.senses || []).map((s) => `${s.gloss} ${s.lemma}`),
+        ]
+          .join("\n")
+          .toLowerCase();
+        return blob.includes(q);
+      });
+    }
+    list.sort(
+      (a, b) =>
+        String(b.entry.updatedAt || "").localeCompare(String(a.entry.updatedAt || "")) ||
+        String(a.entry.surface || "").localeCompare(String(b.entry.surface || ""))
+    );
+    return list.map(({ key, entry, flat }) => ({
+      key,
+      surface: entry.surface,
+      ...flat,
+      senseCount: (entry.senses || []).length,
+    }));
+  }
+
+  function removeVocabBankEntry(surfaceKey) {
+    const bank = loadVocabBank();
+    const k = normVocabBankKey(surfaceKey);
+    if (!k || !bank.bySurface[k]) return false;
+    delete bank.bySurface[k];
+    saveVocabBank(bank);
+    return true;
+  }
+
+  function removeVocabBankSense(surfaceKey, senseId) {
+    const bank = loadVocabBank();
+    const k = normVocabBankKey(surfaceKey);
+    const entry = bank.bySurface[k];
+    if (!entry) return false;
+    ensureBankEntrySenses(entry);
+    const before = entry.senses.length;
+    entry.senses = entry.senses.filter((s) => s.id !== senseId);
+    if (!entry.senses.length) {
+      delete bank.bySurface[k];
+    } else {
+      if (entry.primarySenseId === senseId) entry.primarySenseId = entry.senses[0].id;
+      ensureBankEntrySenses(entry);
+      bank.bySurface[k] = entry;
+    }
+    saveVocabBank(bank);
+    return entry.senses ? entry.senses.length < before || !bank.bySurface[k] : true;
+  }
+
+  function setVocabBankPrimarySense(surfaceKey, senseId) {
+    const bank = loadVocabBank();
+    const k = normVocabBankKey(surfaceKey);
+    const entry = bank.bySurface[k];
+    if (!entry) return false;
+    ensureBankEntrySenses(entry);
+    if (!entry.senses.some((s) => s.id === senseId)) return false;
+    entry.primarySenseId = senseId;
+    ensureBankEntrySenses(entry);
+    entry.updatedAt = new Date().toISOString();
+    bank.bySurface[k] = entry;
+    saveVocabBank(bank);
+    return true;
+  }
+
+  function estimateVocabBankCoverage(query, tokenHints = []) {
+    const src = String(query || "").trim();
+    if (!src) return { ratio: 0, hit: 0, total: 0 };
+    const bank = loadVocabBank();
+    const hints = Array.isArray(tokenHints) ? tokenHints : [];
+    if (hints.length) {
+      const content = hints.filter((t) => String(t?.surface || "").trim().length >= 2);
+      if (!content.length) return { ratio: 0, hit: 0, total: 0 };
+      let hit = 0;
+      for (const t of content) {
+        const h = findVocabBankHit(bank, t.surface, t.lemma);
+        if (h && String(h.gloss || "").trim()) hit += 1;
+      }
+      return { ratio: hit / content.length, hit, total: content.length };
+    }
+    const keys = Object.keys(bank.bySurface || {}).filter(
+      (k) => k.length >= 2 && src.includes(k)
+    );
+    if (!keys.length) return { ratio: 0, hit: 0, total: 0 };
+    let hit = 0;
+    for (const k of keys) {
+      if (vocabBankHasPayload(bank.bySurface[k])) hit += 1;
+    }
+    return { ratio: hit / keys.length, hit, total: keys.length };
   }
 
   /**
@@ -1055,6 +1581,19 @@ const Storage = (() => {
     removeHistoryEntry,
     clearHistory,
     slimInventoryItems,
+    slimVocabItems,
+    loadVocabBank,
+    saveVocabBank,
+    upsertVocabBankEntries,
+    lookupVocabBank,
+    listVocabBankEntries,
+    removeVocabBankEntry,
+    removeVocabBankSense,
+    setVocabBankPrimarySense,
+    estimateVocabBankCoverage,
+    mergeVocabWithBank,
+    harvestVocabBankFromSnapshots,
+    VOCAB_BANK_MAX,
     HISTORY_MAX,
     normalizeStructureTheme,
     DEFAULT_SETTINGS,
