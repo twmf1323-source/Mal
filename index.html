@@ -8,7 +8,7 @@
       content="韓語文法筆記本 — API 文法盤點；缺失加入待辦；標題格式：中文（韓語）"
     />
     <title>Mal · 韓語文法筆記本</title>
-    <link rel="stylesheet" href="css/styles.css?v=file1" />
+    <link rel="stylesheet" href="css/styles.css?v=file2" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -51,11 +51,6 @@
           <button type="button" class="nav-btn" data-view="form" id="nav-form-hidden" hidden>表單</button>
         </nav>
       </header>
-      <div id="file-protocol-banner" class="file-protocol-banner" hidden role="status">
-        雙擊 HTML 時，瀏覽器不允許讀取本機模型與種子檔。已改從
-        <a href="https://twmf1323-source.github.io/Mal/">線上版</a>
-        載入（需網路）。離線請改雙擊「開啟筆記本.bat」。
-      </div>
 
       <main class="app-main">
         <!-- 查詢 -->
@@ -701,11 +696,5 @@
     <script src="js/kiwi.js?v=file1"></script>
     <script src="js/ai.js"></script>
     <script src="js/app.js"></script>
-    <script>
-      if (location.protocol === "file:") {
-        const el = document.getElementById("file-protocol-banner");
-        if (el) el.hidden = false;
-      }
-    </script>
   </body>
 </html>

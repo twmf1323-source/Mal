@@ -2858,21 +2858,6 @@ body.locate-mode-active .sentence-text {
   white-space: nowrap;
   color: var(--ink, #1a2b3d);
 }
-.file-protocol-banner {
-  margin: 0.15rem 1rem 0.7rem;
-  padding: 0.6rem 0.9rem;
-  background: var(--warn-bg);
-  border: 1px solid var(--warn-line);
-  color: var(--warn);
-  border-radius: var(--radius-sm);
-  font-size: 0.86rem;
-  line-height: 1.45;
-}
-
-.file-protocol-banner a {
-  font-weight: 600;
-}
-
 .kiwi-status {  margin: 0.55rem 0 0;
   font-size: 0.78rem;
   line-height: 1.35;
