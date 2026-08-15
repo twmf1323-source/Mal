@@ -50,6 +50,15 @@ const Storage = (() => {
     return ok ? id : DEFAULT_SETTINGS.structureTheme;
   }
 
+  const REMOTE_BASE = "https://twmf1323-source.github.io/Mal/";
+
+  function seedUrl() {
+    if (typeof location !== "undefined" && location.protocol === "file:") {
+      return REMOTE_BASE + "data/seed-rules.json";
+    }
+    return "data/seed-rules.json";
+  }
+
   function loadRules() {
     try {
       const raw = localStorage.getItem(RULES_KEY);
@@ -364,7 +373,7 @@ const Storage = (() => {
       let changed = false;
       // 補齊新增種子（不覆蓋使用者已有同 id）
       try {
-        const res = await fetch("data/seed-rules.json");
+        const res = await fetch(seedUrl());
         if (res.ok) {
           const seedList = await res.json();
           const ens = ensureMissingSeedRules(next, seedList);
@@ -406,7 +415,7 @@ const Storage = (() => {
       return next;
     }
     try {
-      const res = await fetch("data/seed-rules.json");
+      const res = await fetch(seedUrl());
       if (!res.ok) throw new Error("seed fetch failed");
       rules = await res.json();
     } catch {

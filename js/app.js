@@ -160,7 +160,8 @@ const App = (() => {
     el.className = `kiwi-status ${st.status}`;
     if (st.status === "loading") {
       el.hidden = false;
-      el.textContent = "背景載入模型中…";
+      el.textContent =
+        location.protocol === "file:" ? "從網站載入模型中…" : "背景載入模型中…";
     } else if (st.status === "error") {
       el.hidden = false;
       el.textContent = `載入失敗：${st.error || "未知錯誤"}`;

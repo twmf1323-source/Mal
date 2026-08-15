@@ -26,8 +26,15 @@ const KiwiService = (() => {
   const cache = new Map();
   const listeners = new Set();
 
+  const REMOTE_BASE = "https://twmf1323-source.github.io/Mal/";
+
+  function isFileProtocol() {
+    return typeof location !== "undefined" && location.protocol === "file:";
+  }
+
   function assetUrl(rel) {
-    return new URL(rel, document.baseURI).href;
+    const base = isFileProtocol() ? REMOTE_BASE : document.baseURI;
+    return new URL(rel, base).href;
   }
 
   const GITHUB_LFS_MEDIA =
@@ -57,7 +64,8 @@ const KiwiService = (() => {
   }
 
   async function fetchBuffer(url, label, rel) {
-    let buf = await fetchOne(url, label, { credentials: "same-origin" });
+    const cred = isFileProtocol() ? "omit" : "same-origin";
+    let buf = await fetchOne(url, label, { credentials: cred });
     if (looksLikeLfsPointer(buf)) {
       const media = GITHUB_LFS_MEDIA + String(rel || "").replace(/^\/+/, "");
       buf = await fetchOne(media, label + "（Git LFS）", { credentials: "omit" });
@@ -69,9 +77,6 @@ const KiwiService = (() => {
   }
 
   async function fetchAssets() {
-    if (typeof location !== "undefined" && location.protocol === "file:") {
-      throw new Error("請用本機伺服器開啟（例如 npx serve .），不要直接雙擊 HTML");
-    }
     const wasmRel = "vendor/kiwi-nlp/dist/kiwi-wasm.wasm";
     const wasm = await fetchBuffer(assetUrl(wasmRel), "WASM", wasmRel);
     const files = {};
@@ -250,13 +255,17 @@ const KiwiService = (() => {
     setStatus("loading");
     initPromise = (async () => {
       const assets = await fetchAssets();
-      try {
-        await initViaWorker(assets);
-      } catch (workerErr) {
-        console.warn("[kiwi] worker 失敗，改在主執行緒載入", workerErr);
-        stopWorker();
-        const retry = await fetchAssets();
-        await initOnMain(retry);
+      if (isFileProtocol()) {
+        await initOnMain(assets);
+      } else {
+        try {
+          await initViaWorker(assets);
+        } catch (workerErr) {
+          console.warn("[kiwi] worker 失敗，改在主執行緒載入", workerErr);
+          stopWorker();
+          const retry = await fetchAssets();
+          await initOnMain(retry);
+        }
       }
       setStatus("ready", "");
     })().catch((err) => {
