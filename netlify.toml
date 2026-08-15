@@ -1,6 +1,9 @@
 [build]
   publish = "."
 
+[build.environment]
+  GIT_LFS_ENABLED = "true"
+
 [[headers]]
   for = "/*"
   [headers.values]

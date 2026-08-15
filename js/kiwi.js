@@ -30,26 +30,55 @@ const KiwiService = (() => {
     return new URL(rel, document.baseURI).href;
   }
 
-  async function fetchBuffer(url, label) {
-    const res = await fetch(url, { credentials: "same-origin" });
+  const GITHUB_LFS_MEDIA =
+    "https://media.githubusercontent.com/media/twmf1323-source/Mal/main/";
+
+  function looksLikeLfsPointer(buf) {
+    if (!buf || buf.byteLength < 40 || buf.byteLength > 800) return false;
+    try {
+      const head = new TextDecoder("utf-8").decode(buf.slice(0, 80));
+      return head.startsWith("version https://git-lfs.github.com/");
+    } catch {
+      return false;
+    }
+  }
+
+  function isWasmMagic(buf) {
+    const u = new Uint8Array(buf);
+    return u.length >= 4 && u[0] === 0x00 && u[1] === 0x61 && u[2] === 0x73 && u[3] === 0x6d;
+  }
+
+  async function fetchOne(url, label, opts) {
+    const res = await fetch(url, opts);
     if (!res.ok) {
       throw new Error(`${label} 載入失敗（HTTP ${res.status}）`);
     }
     return res.arrayBuffer();
   }
 
+  async function fetchBuffer(url, label, rel) {
+    let buf = await fetchOne(url, label, { credentials: "same-origin" });
+    if (looksLikeLfsPointer(buf)) {
+      const media = GITHUB_LFS_MEDIA + String(rel || "").replace(/^\/+/, "");
+      buf = await fetchOne(media, label + "（Git LFS）", { credentials: "omit" });
+    }
+    if (label === "WASM" && !isWasmMagic(buf)) {
+      throw new Error("WASM 不是有效的 WebAssembly 檔（可能拿到 Git LFS 指標）");
+    }
+    return buf;
+  }
+
   async function fetchAssets() {
     if (typeof location !== "undefined" && location.protocol === "file:") {
       throw new Error("請用本機伺服器開啟（例如 npx serve .），不要直接雙擊 HTML");
     }
-    const wasm = await fetchBuffer(assetUrl("vendor/kiwi-nlp/dist/kiwi-wasm.wasm"), "WASM");
+    const wasmRel = "vendor/kiwi-nlp/dist/kiwi-wasm.wasm";
+    const wasm = await fetchBuffer(assetUrl(wasmRel), "WASM", wasmRel);
     const files = {};
     await Promise.all(
       MODEL_FILES.map(async (name) => {
-        files[name] = await fetchBuffer(
-          assetUrl("vendor/kiwi/models/cong/base/" + name),
-          name
-        );
+        const rel = "vendor/kiwi/models/cong/base/" + name;
+        files[name] = await fetchBuffer(assetUrl(rel), name, rel);
       })
     );
     return { wasm, files };
