@@ -1,0 +1,10 @@
+Kiwi (Korean Intelligent Word Identifier)
+https://github.com/bab2min/Kiwi
+
+License: LGPL-2.1-or-later
+
+This directory contains the official Kiwi morphological analysis model
+(v0.23.2, cong/base) used by Mal · 韓語文法筆記本.
+
+The Kiwi WASM binding (vendor/kiwi-nlp) is the npm package `kiwi-nlp`
+(LGPL-2.1-or-later). Source: https://github.com/bab2min/Kiwi
