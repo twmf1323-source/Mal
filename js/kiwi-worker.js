@@ -10,13 +10,15 @@ function reply(id, payload) {
 }
 
 function slimToken(t) {
-  return {
+  const row = {
     str: t.str,
     tag: t.tag,
     position: t.position,
     length: t.length,
     score: t.score,
   };
+  if (t.wordPosition != null) row.wordPosition = t.wordPosition;
+  return row;
 }
 
 function toUint8(data) {

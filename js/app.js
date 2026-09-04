@@ -1,6 +1,6 @@
 /**
  * Mal · 韓語文法筆記本 — 主應用
- * API 查詢盤點 · 雙語規則名 · 缺失文法→待辦 · 無本地句中掃描
+ * API 盤點整句 → 先掛本地卡 → 未收錄才生成說明 · 雙語規則名
  */
 const App = (() => {
   const state = {
@@ -32,6 +32,8 @@ const App = (() => {
      * @type {null | { text: string, start: number, end: number }}
      */
     selApply: null,
+    /** 點擊選字編輯（與 hover／複製浮層分開） */
+    sentenceSelectEdit: false,
     /** 規則挑選模式：null=選字套用 · supplementary=圖例「+補充」 */
     rulePickMode: null,
     /** 建立補充用法後自動加入本句 */
@@ -43,8 +45,15 @@ const App = (() => {
      * @type {null | { text: string, start: number, end: number }}
      */
     pendingSelApply: null,
+    /**
+     * 從「尚未收錄」建立規則：儲存後綁回該盤點項（不靠嚴格標題對卡）
+     * @type {null | { invIdx: number, name: string, span: string, start?: number, end?: number, tokenFrom?: number, tokenTo?: number, kiwiKind?: string, category?: string }}
+     */
+    pendingCreateFromInventory: null,
     /** 空專案整首匯入 */
     bulkImport: null,
+    /** 專案 modal：null=大項列表 · ""=未分類 · id=該大項 */
+    projectsBrowseId: null,
     /**
      * 進入表單前的頁面（AI 填寫／取消時跳回）
      * @type {null | string}
@@ -88,15 +97,12 @@ const App = (() => {
     const dot = $("#api-status-dot");
     if (!dot) return;
     const modes = Storage.loadLookupModes();
-    const needApi = modes.apiGrammar || modes.apiVocab;
+    const anyMode = modes.apiGrammar || modes.apiVocab;
     const ready = Storage.hasApiKey();
-    const anyMode = modes.apiGrammar || modes.localGrammar || modes.apiVocab;
     // 手動模式（全關）仍可用；僅「開了 API 卻沒 Key」為未就緒
-    dot.classList.toggle("ready", anyMode ? (needApi ? ready : true) : true);
+    dot.classList.toggle("ready", anyMode ? ready : true);
     if (!anyMode) {
       dot.title = "手動模式（未開掃描 · 仍可查詢）";
-    } else if (!needApi) {
-      dot.title = "本地文法排查（不呼叫 API）";
     } else {
       const label = Storage.formatLookupModesLabel(modes);
       dot.title = ready ? `${label} · Key 已設定` : `${label} · 尚未設定 Key`;
@@ -110,28 +116,25 @@ const App = (() => {
     if (desc) {
       const bits = [];
       if (modes.apiGrammar) bits.push("<strong>API 文法</strong>");
-      if (modes.localGrammar) bits.push("<strong>本地文法</strong>");
       if (modes.apiVocab) bits.push("<strong>API 單字</strong>");
       if (!bits.length) {
         const empty =
-          "目前：手動模式 · 可直接查詢並選字套用（右側可再開 API／本地掃描）";
+          "目前：手動模式 · 可直接查詢並選字套用（右側可再開 API 文法／單字）";
         desc.innerHTML = empty;
         desc.title = empty;
       } else {
-        const needKey = modes.apiGrammar || modes.apiVocab;
+        const keyReqOn = modes.apiGrammar || modes.apiVocab;
         const line =
           `目前：${bits.join(" · ")}` +
-          (needKey ? " · 需 API Key" : " · 無需 API Key") +
+          (keyReqOn ? " · 需 API Key" : "") +
           " · 可選字套用／本句移除";
         desc.innerHTML = line;
         desc.title = line.replace(/<\/?strong>/g, "");
       }
     }
     const apiG = $("#settings-mode-api-grammar");
-    const localG = $("#settings-mode-local-grammar");
     const apiV = $("#settings-mode-api-vocab");
     if (apiG) apiG.checked = Boolean(modes.apiGrammar);
-    if (localG) localG.checked = Boolean(modes.localGrammar);
     if (apiV) apiV.checked = Boolean(modes.apiVocab);
     updateKiwiStatusUI();
     const keyReq = $("#settings-api-key-req");
@@ -192,12 +195,24 @@ const App = (() => {
     }
   }
 
-  async function applyKiwiToInventory(query, inventory) {
+  async function applyKiwiToInventory(query, inventory, opts = {}) {
     if (typeof KiwiService === "undefined" || !KiwiService.isEnabled()) return inventory;
+    const modes = Storage.loadLookupModes();
+    const includeGrammar =
+      opts.includeGrammar != null
+        ? Boolean(opts.includeGrammar)
+        : Boolean(modes.apiGrammar);
     const apply = async () => {
       try {
-        const next = await KiwiService.enrichInventory(query, inventory);
-        if (state.lastQuery === query && state.lastInventory === inventory) {
+        const next = await KiwiService.enrichInventory(query, inventory, { includeGrammar });
+        if (state.lastQuery === query && !state.bulkImport?.running) {
+          const cur = state.lastInventory;
+          if (cur && cur !== next) {
+            if (!Array.isArray(next.vocab) || !next.vocab.length) {
+              next.vocab = Array.isArray(cur.vocab) ? cur.vocab : [];
+            }
+            if (!next.translation && cur.translation) next.translation = cur.translation;
+          }
           state.lastInventory = next;
           if (typeof refreshLookupFromInventory === "function") refreshLookupFromInventory();
         }
@@ -212,17 +227,17 @@ const App = (() => {
       return inventory;
     }
     try {
-      return await KiwiService.enrichInventory(query, inventory);
+      return await KiwiService.enrichInventory(query, inventory, { includeGrammar });
     } catch (err) {
       console.warn("[kiwi] enrich failed", err);
       return inventory;
     }
   }
 
-  /** 全部開啟：API 文法 + API 單字（本地關閉，因文法互斥） */
+  /** 全部開啟：API 文法 + API 單字 */
   function areAllLookupModesOn(modes) {
     const m = modes || Storage.loadLookupModes();
-    return Boolean(m.apiGrammar && m.apiVocab && !m.localGrammar);
+    return Boolean(m.apiGrammar && m.apiVocab);
   }
 
   function syncSettingsModesAllBtn(modes) {
@@ -308,6 +323,93 @@ const App = (() => {
     }
   }
 
+  async function requestApiVocab(form) {
+    const qVocab =
+      typeof Storage.stripEnglishFromVocabQuery === "function"
+        ? Storage.stripEnglishFromVocabQuery(form)
+        : String(form || "").trim();
+    const hasTarget =
+      typeof Storage.vocabQueryHasTargetLanguage === "function"
+        ? Storage.vocabQueryHasTargetLanguage(qVocab)
+        : Boolean(qVocab);
+    if (!hasTarget) {
+      return { summary: "", translation: "", items: [], vocab: [] };
+    }
+    if (typeof AiService.inventoryVocabOnly === "function") {
+      return await AiService.inventoryVocabOnly(qVocab);
+    }
+    return await AiService.inventoryGrammar(qVocab);
+  }
+
+  function mergeVocabPreferGloss(base, extra) {
+    const out = Array.isArray(base) ? base.slice() : [];
+    for (const w of extra || []) {
+      if (!w) continue;
+      const idx = out.findIndex((x) => {
+        if (
+          Number.isFinite(Number(x.start)) &&
+          Number.isFinite(Number(w.start)) &&
+          Math.abs(Number(x.start) - Number(w.start)) <= 1
+        ) {
+          return x.surface === w.surface || (x.lemma && x.lemma === w.lemma);
+        }
+        return x.surface === w.surface || (x.lemma && w.lemma && x.lemma === w.lemma);
+      });
+      if (idx >= 0) {
+        out[idx] = {
+          ...out[idx],
+          ...w,
+          gloss: w.gloss || out[idx].gloss,
+          lemma: w.lemma || out[idx].lemma,
+          pos: w.pos || out[idx].pos,
+          start: Number.isFinite(Number(out[idx].start)) ? out[idx].start : w.start,
+          end: Number.isFinite(Number(out[idx].end)) ? out[idx].end : w.end,
+        };
+      } else {
+        out.push(w);
+      }
+    }
+    return out;
+  }
+
+  async function fetchApiGrammarInventory(form, skipVocab) {
+    let inventory;
+    const kiwiOn = typeof KiwiService !== "undefined" && KiwiService.isEnabled();
+    if (kiwiOn && typeof AiService.inventoryByKoParse === "function") {
+      try {
+        inventory = await AiService.inventoryByKoParse(form, { skipVocab: Boolean(skipVocab) });
+      } catch (err) {
+        console.warn("[inventoryByKoParse]", err);
+        inventory = await AiService.inventoryGrammar(form);
+        inventory.fallbackLegacy = true;
+      }
+    } else {
+      inventory = await AiService.inventoryGrammar(form);
+      inventory.fallbackLegacy = true;
+    }
+    if (skipVocab) inventory.vocab = [];
+    if (typeof RulesService.attachLocalRulesToInventory === "function") {
+      inventory = RulesService.attachLocalRulesToInventory(form, inventory);
+    }
+    return inventory;
+  }
+
+  /** 先掛本地卡，再為真正沒卡的項目生成說明（不寫入筆記本） */
+  async function finalizeApiGrammarInventory(query, inventory) {
+    let inv = inventory && typeof inventory === "object" ? inventory : { items: [] };
+    if (typeof RulesService.attachLocalRulesToInventory === "function") {
+      inv = RulesService.attachLocalRulesToInventory(query, inv);
+    }
+    if (typeof AiService !== "undefined" && typeof AiService.fillMissingRuleDrafts === "function") {
+      try {
+        inv = await AiService.fillMissingRuleDrafts(inv);
+      } catch (err) {
+        console.warn("[fillMissingRuleDrafts]", err);
+      }
+    }
+    return inv;
+  }
+
   /** 以全域單字庫補本句 vocab */
   function prepareInventoryVocab(inventory, query) {
     if (!inventory) return inventory;
@@ -320,8 +422,16 @@ const App = (() => {
     } else if (!Array.isArray(inventory.vocab)) {
       inventory.vocab = [];
     }
+    if (typeof Storage.filterEnglishVocab === "function") {
+      inventory.vocab = Storage.filterEnglishVocab(inventory.vocab);
+    }
+    if (typeof Storage.ensurePronounVocab === "function") {
+      inventory.vocab = Storage.ensurePronounVocab(q, inventory.vocab);
+    }
     return inventory;
   }
+
+  /* attach + generate live in finalizeApiGrammarInventory */
 
   function rememberInventoryVocab(inventory, opts = {}) {
     if (
@@ -337,12 +447,35 @@ const App = (() => {
   /**
    * 用既有盤點結果（或歷史快照）渲染查詢頁，並依「目前」筆記本重分類已收錄／未收錄
    */
+  function lookupStoredTranslation(query) {
+    const q = String(query || "").trim();
+    if (!q) return "";
+    const key = normalizeLookupKey(q);
+    const pid = typeof Storage.getActiveProjectId === "function" ? Storage.getActiveProjectId() : "";
+    if (pid && typeof Storage.findProjectEntryByQuery === "function") {
+      const t = String(Storage.findProjectEntryByQuery(pid, q)?.translation || "").trim();
+      if (t) return t;
+    }
+    const hist = typeof Storage.loadHistory === "function" ? Storage.loadHistory() : [];
+    const h = hist.find((x) => normalizeLookupKey(x?.query) === key);
+    return String(h?.translation || "").trim();
+  }
+
+  function keepExistingTranslation(query, inventory, opts = {}) {
+    if (!inventory || opts.replaceTranslation) return inventory;
+    const stored = lookupStoredTranslation(query);
+    if (stored) inventory.translation = stored;
+    return inventory;
+  }
+
   function applyInventoryToLookup(query, inventory, opts = {}) {
     const q = String(query || "").trim();
     const box = $("#lookup-result");
     if (!box || !q) return null;
 
+    keepExistingTranslation(q, inventory, opts);
     prepareInventoryVocab(inventory, q);
+    const origVocab = Array.isArray(inventory?.vocab) ? inventory.vocab : [];
     // 再正規化（補整句 translation 等；保留手動校正欄位）
     const normalized =
       typeof AiService !== "undefined" && AiService.normalizeInventory
@@ -351,8 +484,9 @@ const App = (() => {
             summary: inventory?.summary || "",
             translation: inventory?.translation || "",
             items: Array.isArray(inventory?.items) ? inventory.items : [],
-            vocab: inventory?.vocab || [],
+            vocab: origVocab,
           };
+    const normVocab = Array.isArray(normalized.vocab) ? normalized.vocab : [];
     let inv = {
       summary: normalized.summary || inventory?.summary || "",
       translation: normalized.translation || inventory?.translation || "",
@@ -361,15 +495,36 @@ const App = (() => {
         : Array.isArray(inventory?.items)
           ? inventory.items
           : [],
-      vocab: normalized.vocab || inventory?.vocab || [],
+      vocab: normVocab.length ? normVocab : origVocab,
+      tokens: Array.isArray(inventory?.tokens)
+        ? inventory.tokens
+        : Array.isArray(normalized.tokens)
+          ? normalized.tokens
+          : [],
       mode: inventory?.mode || "",
       source: inventory?.source || "",
+      mappingFailed: Boolean(inventory?.mappingFailed || normalized.mappingFailed),
+      fallbackLegacy: Boolean(inventory?.fallbackLegacy || normalized.fallbackLegacy),
+      apiRejectedCount: Number(inventory?.apiRejectedCount || normalized.apiRejectedCount) || 0,
+      unresolvedGrammarCount:
+        Number(inventory?.unresolvedGrammarCount || normalized.unresolvedGrammarCount) || 0,
+      apiRepairUsed: Boolean(inventory?.apiRepairUsed || normalized.apiRepairUsed),
+      grammarEnabled:
+        inventory?.grammarEnabled != null
+          ? Boolean(inventory.grammarEnabled)
+          : Boolean(Storage.loadLookupModes().apiGrammar),
     };
     // normalize 可能洗掉 bank merge，再補一次
     prepareInventoryVocab(inv, q);
     // API 常漏報「句中有 줘 卻沒列請托」→ 依表面補項（綁本地卡）
-    if (typeof RulesService.enrichInventoryWithSurfaceHints === "function") {
+    if (
+      inv.grammarEnabled &&
+      typeof RulesService.enrichInventoryWithSurfaceHints === "function"
+    ) {
       inv = RulesService.enrichInventoryWithSurfaceHints(q, inv);
+    }
+    if (typeof RulesService.attachLocalRulesToInventory === "function") {
+      inv = RulesService.attachLocalRulesToInventory(q, inv);
     }
 
     state.lastQuery = q;
@@ -386,7 +541,13 @@ const App = (() => {
         source: "api",
         apiLegend: apiHl.legend,
         vocab: inv.vocab,
+        tokens: inv.tokens,
+        mappingFailed: inv.mappingFailed,
+        fallbackLegacy: inv.fallbackLegacy,
+        audit: apiHl.audit,
+        inventory: inv,
       }) +
+      morphBoardHtml(q, inv) +
       `<div class="lookup-result-body">` +
       localMatchesHtml(apiHl.ownedHits || [], inv) +
       missingInventoryHtml(inv, apiHl.missingItems) +
@@ -407,6 +568,7 @@ const App = (() => {
     // 允許 items 為空：仍還原句子與結果區
     const items = Array.isArray(entry.items) ? entry.items : [];
     const vocab = Array.isArray(entry.vocab) ? entry.vocab : [];
+    const tokens = Array.isArray(entry.tokens) ? entry.tokens : [];
     setView("lookup");
     if ($("#lookup-input")) $("#lookup-input").value = entry.query;
     // A1：apply 內已算一次 highlight，直接重用
@@ -418,6 +580,7 @@ const App = (() => {
           translation: entry.translation || "",
           items,
           vocab,
+          tokens,
         },
         { fromHistory: true }
       ) ||
@@ -426,6 +589,7 @@ const App = (() => {
         summary: entry.summary,
         translation: entry.translation,
         vocab,
+        tokens,
       });
     Storage.addHistoryEntry({
       query: entry.query,
@@ -435,6 +599,7 @@ const App = (() => {
       missingCount: (apiHl.missingItems || []).length,
       items,
       vocab,
+      tokens,
     });
     updateLookupNavBtns();
     updateBackgroundLookupBanner();
@@ -454,6 +619,7 @@ const App = (() => {
     if (entry.seq != null) state.projectCursorSeq = entry.seq;
     const items = Array.isArray(entry.items) ? entry.items : [];
     const vocab = Array.isArray(entry.vocab) ? entry.vocab : [];
+    const tokens = Array.isArray(entry.tokens) ? entry.tokens : [];
     setView("lookup");
     if ($("#lookup-input")) $("#lookup-input").value = entry.query;
     const apiHl =
@@ -464,6 +630,7 @@ const App = (() => {
           translation: entry.translation || "",
           items,
           vocab,
+          tokens,
         },
         { fromHistory: true }
       ) ||
@@ -472,11 +639,14 @@ const App = (() => {
         summary: entry.summary,
         translation: entry.translation,
         vocab,
+        tokens,
       });
     // 僅更新專案內快照計數，序號不變、不寫一般歷史
     const pid = Storage.getActiveProjectId();
     if (pid) {
       Storage.upsertProjectEntry(pid, {
+        id: entry.id,
+        seq: entry.seq,
         query: entry.query,
         summary: entry.summary || "",
         translation: entry.translation || "",
@@ -484,6 +654,7 @@ const App = (() => {
         missingCount: (apiHl.missingItems || []).length,
         items,
         vocab,
+        tokens,
       });
     }
     updateProjectModeUI();
@@ -615,21 +786,39 @@ const App = (() => {
     if (navBtn) {
       navBtn.classList.toggle("project-active", inProject);
       navBtn.title = inProject
-        ? `回到專案「${project.name || "未命名"}」（離開請用查詢頁「離開專案」）`
-        : "建立、開啟或管理專案（歌詞等連貫文本）";
+        ? `回到分項「${project.name || "未命名"}」（離開請用查詢頁「離開專案」）`
+        : "大項／分項：小說各章、歌詞各首";
     }
 
     if (inProject) {
       const nameEl = $("#project-mode-name");
       const posEl = $("#project-mode-pos");
-      if (nameEl) nameEl.textContent = project.name || "未命名專案";
+      const colBtn = $("#project-mode-collection");
+      const sepEl = $("#project-mode-path-sep");
+      const col = project.collectionId ? Storage.getCollection(project.collectionId) : null;
+      if (colBtn && sepEl) {
+        if (col) {
+          colBtn.textContent = col.name || "未命名";
+          colBtn.classList.remove("hidden");
+          sepEl.classList.remove("hidden");
+        } else if (project.collectionId) {
+          colBtn.classList.add("hidden");
+          sepEl.classList.add("hidden");
+        } else {
+          colBtn.textContent = "未分類";
+          colBtn.classList.remove("hidden");
+          sepEl.classList.remove("hidden");
+        }
+      }
+      if (nameEl && document.activeElement !== nameEl) {
+        nameEl.textContent = project.name || "未命名專案";
+      }
       const entries = Storage.getProjectEntriesSorted(project);
       const total = entries.length;
       let curSeq = state.projectCursorSeq;
       const curQ = String($("#lookup-input")?.value || "").trim();
       if (curQ) {
-        const hit = Storage.findProjectEntryByQuery(project.id, curQ);
-        if (hit) curSeq = hit.seq;
+        curSeq = resolveDisplayedProjectSeq(project.id, curQ, curSeq);
       }
       if (posEl) {
         if (total === 0) {
@@ -647,10 +836,158 @@ const App = (() => {
     syncProjectBulkImport();
   }
 
+  function commitProjectRename() {
+    const el = $("#project-mode-name");
+    const project = Storage.getActiveProject();
+    if (!el || !project) return;
+    const next = String(el.textContent || "").replace(/\s+/g, " ").trim();
+    if (!next) {
+      el.textContent = project.name || "未命名專案";
+      showToast("專案名稱不能空白", "error");
+      return;
+    }
+    if (next === String(project.name || "").trim()) {
+      el.textContent = project.name || next;
+      return;
+    }
+    const updated = Storage.renameProject(project.id, next);
+    el.textContent = updated?.name || next;
+    updateProjectModeUI();
+    renderProjectsList();
+    showToast(`已改名為「${updated?.name || next}」`, "success");
+  }
+
+  function bindProjectNameEdit() {
+    const el = $("#project-mode-name");
+    if (!el || el.dataset.renameBound === "1") return;
+    el.dataset.renameBound = "1";
+    let snapshot = "";
+    el.addEventListener("focus", () => {
+      snapshot = String(el.textContent || "");
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.isComposing) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        el.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        el.textContent = snapshot;
+        el.blur();
+      }
+    });
+    el.addEventListener("paste", (e) => {
+      e.preventDefault();
+      const text = String((e.clipboardData || window.clipboardData)?.getData("text") || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text) document.execCommand("insertText", false, text);
+    });
+    el.addEventListener("blur", () => commitProjectRename());
+  }
+
   function isEmptyActiveProject() {
     const p = Storage.getActiveProject();
     if (!p) return false;
     return Storage.getProjectEntriesSorted(p).length === 0;
+  }
+
+  const SENTENCE_END_MARK = /[。．｡！？!?…⋯‼⁇⁈⁉]/;
+  const SENTENCE_END_CLOSER = /[」』）\)］】》〉»"”’]/;
+  const LETTER_BEFORE_DOT = /[\u3040-\u30FF\u4E00-\u9FFFー」』）)］】》〉A-Za-zÀ-ÖØ-öø-ÿ\uAC00-\uD7A3]/;
+
+  function isSentenceEndChar(ch, prev, next) {
+    if (SENTENCE_END_MARK.test(ch)) return true;
+    if (ch === "." && prev && LETTER_BEFORE_DOT.test(prev) && !/\d/.test(next || "")) {
+      return true;
+    }
+    return false;
+  }
+
+  function isCommaBreakChar(ch, prev, next) {
+    if (ch === "、" || ch === "，" || ch === "､") return true;
+    if (ch === "," && !(/\d/.test(prev || "") && /\d/.test(next || ""))) return true;
+    return false;
+  }
+
+  /** 依指定標點切開一行；標點與緊接的閉括號留在上一句。無該標點則原樣。 */
+  function splitLineByBreakPred(line, isBreak) {
+    const s = String(line || "");
+    if (!s.trim()) return [];
+    const parts = [];
+    let start = 0;
+    let i = 0;
+    while (i < s.length) {
+      const prev = i > 0 ? s[i - 1] : "";
+      const next = i + 1 < s.length ? s[i + 1] : "";
+      if (!isBreak(s[i], prev, next)) {
+        i += 1;
+        continue;
+      }
+      let j = i;
+      while (j < s.length) {
+        const p = j > 0 ? s[j - 1] : "";
+        const n = j + 1 < s.length ? s[j + 1] : "";
+        if (!isBreak(s[j], p, n)) break;
+        j += 1;
+      }
+      while (j < s.length && SENTENCE_END_CLOSER.test(s[j])) j += 1;
+      const piece = s.slice(start, j).trim();
+      if (piece) parts.push(piece);
+      while (j < s.length && /[\s\u3000]/.test(s[j])) j += 1;
+      start = j;
+      i = j;
+    }
+    const tail = s.slice(start).trim();
+    if (tail) parts.push(tail);
+    return parts.length > 1 ? parts : [s];
+  }
+
+  function breakBulkTextByPred(text, isBreak) {
+    return String(text || "")
+      .split(/\r?\n/)
+      .flatMap((line) => (line.trim() ? splitLineByBreakPred(line, isBreak) : [""]))
+      .join("\n");
+  }
+
+  function applyBulkTextTransform(transform, noChangeToast, successLabel) {
+    if (state.bulkImport?.running) return;
+    const ta = $("#project-bulk-input");
+    if (!ta) return;
+    const before = ta.value;
+    if (!before.trim()) {
+      showToast("請先貼上歌詞或文本", "error");
+      ta.focus();
+      return;
+    }
+    const after = transform(before);
+    const same =
+      after.replace(/\r\n/g, "\n") === String(before).replace(/\r\n/g, "\n");
+    if (same) {
+      showToast(noChangeToast, "info");
+      return;
+    }
+    ta.value = after;
+    updateBulkImportHint();
+    const info = splitBulkLines(after);
+    showToast(`已${successLabel}分成 ${info.lines.length} 行，可再改後再分析`, "success");
+    ta.focus();
+  }
+
+  function applyBulkSentenceBreaks() {
+    applyBulkTextTransform(
+      (text) => breakBulkTextByPred(text, isSentenceEndChar),
+      "沒有可依句號拆開的句子",
+      "依句號"
+    );
+  }
+
+  function applyBulkCommaBreaks() {
+    applyBulkTextTransform(
+      (text) => breakBulkTextByPred(text, isCommaBreakChar),
+      "沒有可依逗號拆開的句子",
+      "依逗號"
+    );
   }
 
   function splitBulkLines(text) {
@@ -658,15 +995,12 @@ const App = (() => {
     const nonempty = rawLines.map((s) => s.trim()).filter(Boolean);
     const seen = new Set();
     const lines = [];
-    let skippedDup = 0;
+    let dupCount = 0;
     for (const line of nonempty) {
       const key = Storage.normalizeQueryKey(line);
       if (!key) continue;
-      if (seen.has(key)) {
-        skippedDup += 1;
-        continue;
-      }
-      seen.add(key);
+      if (seen.has(key)) dupCount += 1;
+      else seen.add(key);
       lines.push(line);
     }
     return {
@@ -674,7 +1008,7 @@ const App = (() => {
       rawCount: rawLines.length,
       nonemptyCount: nonempty.length,
       skippedEmpty: rawLines.length - nonempty.length,
-      skippedDup,
+      dupCount,
     };
   }
 
@@ -682,7 +1016,7 @@ const App = (() => {
     if (!info || !info.nonemptyCount) return "尚未貼上內容";
     const bits = [`將匯入 ${info.lines.length} 句`];
     if (info.skippedEmpty) bits.push(`略過空行 ${info.skippedEmpty}`);
-    if (info.skippedDup) bits.push(`重複合併 ${info.skippedDup}`);
+    if (info.dupCount) bits.push(`重複保留 ${info.dupCount}（API 只查一次）`);
     return bits.join(" · ");
   }
 
@@ -751,14 +1085,99 @@ const App = (() => {
     updateBackgroundLookupBanner();
   }
 
-  function persistBulkLine(query, inventory, projectId) {
-    const apiHl = buildApiHighlight(query, inventory);
-    persistLookupResult(query, inventory, apiHl, {
-      silent: true,
-      keepCursor: true,
-      projectId,
-    });
+  async function persistBulkLine(query, inventory, projectId) {
+    const inv =
+      inventory && typeof inventory === "object"
+        ? inventory
+        : { summary: "", translation: "", items: [], vocab: [], tokens: [] };
+    let apiHl = { ownedHits: [], missingItems: [], spans: [], legend: [] };
+    try {
+      apiHl = buildApiHighlight(query, inv) || apiHl;
+    } catch (err) {
+      console.warn("[persistBulkLine highlight]", query, err);
+    }
+    try {
+      persistLookupResult(query, inv, apiHl, {
+        silent: true,
+        keepCursor: true,
+        projectId,
+        forceNew: true,
+      });
+    } catch (err) {
+      console.warn("[persistBulkLine]", query, err);
+      try {
+        if (typeof Storage.upsertProjectEntry === "function") {
+          Storage.upsertProjectEntry(projectId, {
+            query,
+            summary: `分析失敗：${err.message || "無法寫入"}`,
+            translation: "",
+            items: [],
+            vocab: [],
+            tokens: [],
+            forceNew: true,
+          });
+        }
+      } catch (err2) {
+        console.warn("[persistBulkLine fallback]", err2);
+      }
+    }
+    try {
+      if (typeof Storage.flushProjects === "function") {
+        await Storage.flushProjects();
+      }
+    } catch (err) {
+      console.warn("[persistBulkLine flush]", query, err);
+    }
     return apiHl;
+  }
+
+  function cloneLookupJson(value) {
+    if (value == null) return value;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return value;
+    }
+  }
+
+  function isFailedLookupInventory(inventory) {
+    if (!inventory) return true;
+    if (inventory.source === "failed" || inventory.mode === "failed") return true;
+    return /分析失敗/.test(String(inventory.summary || ""));
+  }
+
+  function inventoryFromStoredSnapshot(entry) {
+    if (!entry) return null;
+    return {
+      summary: String(entry.summary || ""),
+      translation: String(entry.translation || ""),
+      items: cloneLookupJson(entry.items) || [],
+      vocab: cloneLookupJson(entry.vocab) || [],
+      tokens: cloneLookupJson(entry.tokens) || [],
+      mode: "cached",
+      source: "cached",
+    };
+  }
+
+  function rememberBulkInventory(cache, line, inventory) {
+    const key = Storage.normalizeQueryKey(line);
+    if (!key || isFailedLookupInventory(inventory) || cache.has(key)) return;
+    cache.set(key, cloneLookupJson(inventory));
+  }
+
+  function reuseBulkInventory(cache, line, { needApi, projectId } = {}) {
+    const key = Storage.normalizeQueryKey(line);
+    if (!key) return null;
+    if (cache.has(key)) return cloneLookupJson(cache.get(key));
+    if (!needApi) return null;
+    const stored =
+      typeof Storage.findReusableSnapshotByQuery === "function"
+        ? Storage.findReusableSnapshotByQuery(line, { projectId })
+        : null;
+    if (!stored) return null;
+    const inv = inventoryFromStoredSnapshot(stored);
+    cache.set(key, cloneLookupJson(inv));
+    return inv;
   }
 
   async function runProjectBulkImport() {
@@ -780,7 +1199,7 @@ const App = (() => {
     const modes = Storage.loadLookupModes();
     const needApi = modes.apiGrammar || modes.apiVocab;
     if (needApi && !Storage.hasApiKey()) {
-      showToast("此模式需要 API Key，請先到「設定」填入（或改開本地文法排查）", "error");
+      showToast("此模式需要 API Key，請先到「設定」填入", "error");
       setView("settings");
       return;
     }
@@ -796,7 +1215,8 @@ const App = (() => {
       total: info.lines.length,
       done: 0,
       failed: 0,
-      skippedDup: info.skippedDup,
+      dupCount: info.dupCount,
+      reused: 0,
       current: "",
     };
     state.bulkImport = job;
@@ -805,20 +1225,32 @@ const App = (() => {
     syncProjectBulkImport();
 
     let firstQuery = null;
+    const lookupCache = new Map();
     try {
       for (const line of info.lines) {
         if (job.cancel || !Storage.getProject(startPid)) break;
         job.current = line;
         updateBulkProgressDom();
+        let reusedThis = false;
         try {
-          const inventory = await fetchLookupInventory(line);
+          let inventory = reuseBulkInventory(lookupCache, line, {
+            needApi,
+            projectId: startPid,
+          });
+          reusedThis = Boolean(inventory);
+          if (!inventory) {
+            inventory = await fetchLookupInventory(line);
+          }
           if (job.cancel || !Storage.getProject(startPid)) break;
-          persistBulkLine(line, inventory, startPid);
+          await persistBulkLine(line, inventory, startPid);
+          if (!reusedThis) rememberBulkInventory(lookupCache, line, inventory);
+          if (reusedThis) job.reused += 1;
           if (!firstQuery) firstQuery = line;
         } catch (err) {
+          console.warn("[bulk line]", line, err);
           if (job.cancel || !Storage.getProject(startPid)) break;
           job.failed += 1;
-          persistBulkLine(
+          await persistBulkLine(
             line,
             {
               summary: `分析失敗：${err.message || "未知錯誤"}`,
@@ -833,33 +1265,45 @@ const App = (() => {
           if (!firstQuery) firstQuery = line;
         }
         job.done += 1;
-        if (firstQuery && job.done === 1 && Storage.getActiveProjectId() === startPid) {
-          const first = Storage.findProjectEntryByQuery(startPid, firstQuery);
-          if (first) {
-            reviewProjectEntry(first, { silent: true });
-            showToast(
-              `第 ${first.seq} 句已可看 · 其餘 ${job.total - 1} 句在背景繼續；可先開其他專案`,
-              "success"
-            );
+        try {
+          if (firstQuery && job.done === 1 && Storage.getActiveProjectId() === startPid) {
+            const first = Storage.findProjectEntryByQuery(startPid, firstQuery);
+            if (first) {
+              reviewProjectEntry(first, { silent: true });
+              showToast(
+                `第 ${first.seq} 句已可看 · 其餘 ${job.total - 1} 句在背景繼續；可先開其他專案`,
+                "success"
+              );
+            }
           }
+          if (Storage.getActiveProjectId() === startPid) updateProjectModeUI();
+          if (
+            !$("#project-entries-modal")?.classList.contains("hidden") &&
+            Storage.getActiveProjectId() === startPid
+          ) {
+            renderProjectEntriesList(startPid);
+          }
+        } catch (err) {
+          console.warn("[bulk ui]", err);
         }
-        if (Storage.getActiveProjectId() === startPid) updateProjectModeUI();
-        if (
-          !$("#project-entries-modal")?.classList.contains("hidden") &&
-          Storage.getActiveProjectId() === startPid
-        ) {
-          renderProjectEntriesList(startPid);
-        }
-        if (needApi && !job.cancel) {
+        if (needApi && !job.cancel && !reusedThis) {
           await new Promise((r) => setTimeout(r, 280));
         }
       }
     } finally {
+      try {
+        if (typeof Storage.flushProjects === "function") {
+          await Storage.flushProjects();
+        }
+      } catch (err) {
+        console.warn("[bulk flush]", err);
+      }
       state.lookupBusy = false;
       const cancelled = job.cancel;
       const done = job.done;
       const failed = job.failed;
-      const skippedDup = job.skippedDup;
+      const dupCount = job.dupCount;
+      const reused = job.reused;
       state.bulkImport = null;
       document.body.classList.remove("bulk-import-running");
       updateBulkProgressDom();
@@ -877,7 +1321,8 @@ const App = (() => {
       syncProjectBulkImport();
 
       const bits = [`「${startName}」已匯入 ${done} 句`];
-      if (skippedDup) bits.push(`重複合併 ${skippedDup}`);
+      if (dupCount) bits.push(`重複保留 ${dupCount}`);
+      if (reused) bits.push(`API 沿用 ${reused}`);
       if (failed) bits.push(`失敗 ${failed}`);
       if (cancelled && done < info.lines.length) bits.push("已取消其餘");
       showToast(bits.join(" · "), failed ? "info" : "success");
@@ -1031,8 +1476,7 @@ const App = (() => {
         let curSeq = state.projectCursorSeq;
         const curQ = String($("#lookup-input")?.value || "").trim();
         if (curQ) {
-          const hit = Storage.findProjectEntryByQuery(project?.id, curQ);
-          if (hit) curSeq = hit.seq;
+          curSeq = resolveDisplayedProjectSeq(project?.id, curQ, curSeq);
         }
         if (total === 0) {
           label.textContent = "—";
@@ -1047,11 +1491,11 @@ const App = (() => {
       // curIdx < 0（尚未對到句子）時兩向皆可：→ 第一句、← 最後一句
       if (prevBtn) {
         prevBtn.disabled = total === 0 || curIdx === 0;
-        prevBtn.title = "上一號句子";
+        prevBtn.title = "上一號句子（A / ←）";
         prevBtn.setAttribute("aria-label", "上一號句子");
       }
       nextBtn.disabled = total === 0 || (curIdx >= 0 && curIdx >= total - 1);
-      nextBtn.title = "下一號句子";
+      nextBtn.title = "下一號句子（D / →）";
       nextBtn.setAttribute("aria-label", "下一號句子");
       return;
     }
@@ -1066,23 +1510,27 @@ const App = (() => {
     const has = list.length > 0;
     nextBtn.disabled = !has;
     nextBtn.title = has
-      ? "再看歷史中的上一句（本機紀錄）"
+      ? "再看歷史中的上一句（D / →）"
       : "尚無查詢歷史";
     nextBtn.setAttribute("aria-label", has ? "再看歷史上一句" : "尚無查詢歷史");
   }
 
   function resolveProjectCursorIndex(entries) {
     if (!entries?.length) return -1;
-    let curSeq = state.projectCursorSeq;
+    // 副歌／重複句：必須用游標序號。若改找「輸入框同句的第一筆」，
+    // 下一句會從第一次出現處起算，翻頁就會跳回前前頁打轉。
+    if (state.projectCursorSeq != null) {
+      const byCursor = entries.findIndex((e) => e.seq === state.projectCursorSeq);
+      if (byCursor >= 0) return byCursor;
+    }
     const curQ = String($("#lookup-input")?.value || "").trim();
     if (curQ) {
       const hit = entries.find(
         (e) => Storage.normalizeQueryKey(e.query) === Storage.normalizeQueryKey(curQ)
       );
-      if (hit) curSeq = hit.seq;
+      if (hit) return entries.findIndex((e) => e.seq === hit.seq);
     }
-    if (curSeq == null) return -1;
-    return entries.findIndex((e) => e.seq === curSeq);
+    return -1;
   }
 
   /**
@@ -1163,8 +1611,116 @@ const App = (() => {
     return Boolean(el.closest && el.closest("input, textarea, select, [contenteditable='true']"));
   }
 
+  let touchSession = false;
+
+  function isCoarsePointer() {
+    if (touchSession) return true;
+    try {
+      return (
+        window.matchMedia("(pointer: coarse)").matches ||
+        window.matchMedia("(hover: none)").matches
+      );
+    } catch {
+      return "ontouchstart" in window;
+    }
+  }
+
+  function visualViewportBox() {
+    const vv = window.visualViewport;
+    if (vv) {
+      return {
+        left: vv.offsetLeft,
+        top: vv.offsetTop,
+        width: vv.width,
+        height: vv.height,
+        right: vv.offsetLeft + vv.width,
+        bottom: vv.offsetTop + vv.height,
+      };
+    }
+    return {
+      left: 0,
+      top: 0,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      right: window.innerWidth,
+      bottom: window.innerHeight,
+    };
+  }
+
+  function eventClientPoint(e) {
+    const t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0]);
+    if (t) return { x: t.clientX, y: t.clientY };
+    if (Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+      return { x: e.clientX, y: e.clientY };
+    }
+    return { x: NaN, y: NaN };
+  }
+
+  function placeFixedPop(pop, clientX, clientY, opts = {}) {
+    if (!pop) return;
+    const pad = opts.pad ?? 8;
+    const gap = opts.gap ?? 12;
+    const vv = visualViewportBox();
+    const rect = pop.getBoundingClientRect();
+    let left = clientX - rect.width / 2;
+    let top = clientY + gap;
+    left = Math.max(vv.left + pad, Math.min(left, vv.right - rect.width - pad));
+    if (top + rect.height > vv.bottom - pad) top = clientY - rect.height - gap;
+    top = Math.max(vv.top + pad, Math.min(top, vv.bottom - rect.height - pad));
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  function placePopNearAnchor(pop, anchor) {
+    if (!pop || !anchor) return;
+    const pad = 8;
+    const vv = visualViewportBox();
+    const rect = anchor.getBoundingClientRect();
+    const pr = pop.getBoundingClientRect();
+    let left = rect.left;
+    let top = rect.bottom + pad;
+    left = Math.max(vv.left + pad, Math.min(left, vv.right - pr.width - pad));
+    if (top + pr.height > vv.bottom - pad && rect.top - pr.height - pad >= vv.top) {
+      top = rect.top - pr.height - pad;
+    }
+    top = Math.max(vv.top + pad, Math.min(top, vv.bottom - pr.height - pad));
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  function bindPadChrome() {
+    if (bindPadChrome.done) return;
+    bindPadChrome.done = true;
+    window.addEventListener(
+      "touchstart",
+      () => {
+        touchSession = true;
+      },
+      { passive: true }
+    );
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let ticking = false;
+    const keepFocusVisible = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        const el = document.activeElement;
+        if (!el || !isEditableKeyTarget(el)) return;
+        try {
+          el.scrollIntoView({ block: "center", inline: "nearest" });
+        } catch {
+          el.scrollIntoView();
+        }
+      });
+    };
+    vv.addEventListener("resize", keepFocusVisible);
+    vv.addEventListener("scroll", keepFocusVisible);
+  }
+
   /**
-   * 查詢頁方向鍵導航：← 上一句 · → 下一句
+   * 查詢頁方向鍵導航：← / A 上一句 · → / D 下一句
    * @returns {boolean} 是否已處理
    */
   function handleLookupArrowNav(e) {
@@ -1179,17 +1735,113 @@ const App = (() => {
     if (!$("#sel-apply-pop")?.classList.contains("hidden")) return false;
     if (state.locateTarget) return false;
 
-    if (e.key === "ArrowLeft") {
+    const code = String(e.code || "");
+    if (e.key === "ArrowLeft" || code === "KeyA") {
       e.preventDefault();
       onLookupSeqPrev();
       return true;
     }
-    if (e.key === "ArrowRight") {
+    if (e.key === "ArrowRight" || code === "KeyD") {
       e.preventDefault();
       onLookupSeqNext();
       return true;
     }
     return false;
+  }
+
+  function isAppHotkeyBlocked(e) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return true;
+    if (e.isComposing || e.keyCode === 229) return true;
+    if (isEditableKeyTarget(e.target)) return true;
+    return false;
+  }
+
+  function isBlockingOverlayOpen() {
+    if (!$("#vocab-edit-modal")?.classList.contains("hidden")) return true;
+    if (!$("#rule-pick-modal")?.classList.contains("hidden")) return true;
+    if (!$("#projects-modal")?.classList.contains("hidden")) return true;
+    if (!$("#project-entries-modal")?.classList.contains("hidden")) return true;
+    if (!$("#sel-apply-pop")?.classList.contains("hidden")) return true;
+    if (state.locateTarget) return true;
+    return false;
+  }
+
+  function dismissTransientUi() {
+    if (!$("#vocab-edit-modal")?.classList.contains("hidden")) closeVocabEditModal();
+    if (!$("#rule-pick-modal")?.classList.contains("hidden")) closeRulePickModal();
+    if (!$("#sel-apply-pop")?.classList.contains("hidden")) {
+      hideSelApplyPop();
+      state.selApply = null;
+    }
+    if (state.locateTarget) cancelLocateMode();
+    if (!$("#project-entries-modal")?.classList.contains("hidden")) closeProjectEntriesModal();
+    if (!$("#projects-modal")?.classList.contains("hidden")) closeProjectsModal();
+  }
+
+  function toggleLookupModeHotkey(which) {
+    const id = which === "apiVocab" ? "settings-mode-api-vocab" : "settings-mode-api-grammar";
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = !el.checked;
+    onLookupModeToggle(which);
+  }
+
+  /** WASD／ZXCVBNM 全域快捷鍵（輸入中不攔截） */
+  function handleAppHotkeys(e) {
+    if (isAppHotkeyBlocked(e)) return false;
+    const code = String(e.code || "");
+
+    if (
+      e.key === "ArrowLeft" ||
+      e.key === "ArrowRight" ||
+      code === "KeyA" ||
+      code === "KeyD"
+    ) {
+      return handleLookupArrowNav(e);
+    }
+
+    if (e.repeat) return false;
+
+    if (code === "KeyW") {
+      if (isBlockingOverlayOpen()) return false;
+      e.preventDefault();
+      toggleLookupModeHotkey("apiGrammar");
+      return true;
+    }
+    if (code === "KeyS") {
+      if (isBlockingOverlayOpen()) return false;
+      e.preventDefault();
+      toggleLookupModeHotkey("apiVocab");
+      return true;
+    }
+
+    const viewByCode = {
+      KeyZ: "lookup",
+      KeyX: "history",
+      KeyC: "projects",
+      KeyV: "rules",
+      KeyB: "vocab",
+      KeyN: "todos",
+      KeyM: "settings",
+    };
+    const dest = viewByCode[code];
+    if (!dest) return false;
+    e.preventDefault();
+    if (dest === "projects") {
+      if (!$("#vocab-edit-modal")?.classList.contains("hidden")) closeVocabEditModal();
+      if (!$("#rule-pick-modal")?.classList.contains("hidden")) closeRulePickModal();
+      if (!$("#sel-apply-pop")?.classList.contains("hidden")) {
+        hideSelApplyPop();
+        state.selApply = null;
+      }
+      if (state.locateTarget) cancelLocateMode();
+      if (!$("#project-entries-modal")?.classList.contains("hidden")) closeProjectEntriesModal();
+      onNavProjects();
+      return true;
+    }
+    dismissTransientUi();
+    setView(dest);
+    return true;
   }
 
   /** 頂部「專案」：已在專案中 → 回查詢頁；否則開列表 */
@@ -1218,25 +1870,81 @@ const App = (() => {
     openProjectsModal();
   }
 
-  function openProjectsModal() {
-    // 僅在未進入專案時開列表（切換／管理請先「離開專案」）
-    if (Storage.getActiveProjectId()) {
-      onNavProjects();
-      return;
-    }
+  function openProjectsModal(opts = {}) {
     const modal = $("#projects-modal");
     if (!modal) return;
+    if (Object.prototype.hasOwnProperty.call(opts, "browseId")) {
+      state.projectsBrowseId = opts.browseId;
+    } else {
+      state.projectsBrowseId = null;
+    }
     modal.classList.remove("hidden");
     renderProjectsList();
     const input = $("#project-new-name");
     if (input) {
       input.value = "";
-      setTimeout(() => input.focus(), 50);
+      if (!isCoarsePointer()) setTimeout(() => input.focus(), 50);
     }
   }
 
   function closeProjectsModal() {
     $("#projects-modal")?.classList.add("hidden");
+  }
+
+  function isBrowsingUngrouped() {
+    return state.projectsBrowseId === "";
+  }
+
+  function browsingCollection() {
+    if (state.projectsBrowseId == null || state.projectsBrowseId === "") return null;
+    return Storage.getCollection(state.projectsBrowseId);
+  }
+
+  function syncProjectsModalChrome() {
+    const atRoot = state.projectsBrowseId == null;
+    const ungrouped = isBrowsingUngrouped();
+    const col = browsingCollection();
+    const title = $("#projects-modal-title");
+    const sub = $("#projects-modal-sub");
+    const crumb = $("#projects-modal-crumb");
+    const crumbCur = $("#projects-crumb-current");
+    const input = $("#project-new-name");
+    const label = $("#project-new-name-label");
+    const createBtn = $("#btn-project-create");
+
+    if (title) title.textContent = atRoot ? "專案" : ungrouped ? "未分類" : col?.name || "分項";
+    if (sub) {
+      sub.textContent = atRoot
+        ? "先選大項（如歌詞、小說），再進分項。句子只存在分項裡。"
+        : "分項是現在的專案：各章／各首歌。進入後查詢會依序編號。";
+    }
+    if (crumb) crumb.classList.toggle("hidden", atRoot);
+    if (crumbCur) {
+      const name = ungrouped ? "未分類" : col?.name || "—";
+      if (document.activeElement !== crumbCur) crumbCur.textContent = name;
+      crumbCur.classList.toggle("is-editable", Boolean(col));
+      crumbCur.contentEditable = col ? "true" : "false";
+      crumbCur.title = col ? "點此改名" : "";
+    }
+    if (input) {
+      input.placeholder = atRoot
+        ? "新大項名稱，例如：歌詞、小說"
+        : "新分項名稱，例如：1절、某首歌";
+    }
+    if (label) label.textContent = atRoot ? "新大項名稱" : "新分項名稱";
+    if (createBtn) createBtn.textContent = atRoot ? "建立大項" : "建立分項";
+  }
+
+  function collectionMoveOptionsHtml(selectedId) {
+    const cur = String(selectedId || "");
+    const cols = Storage.listCollections();
+    const opts = [`<option value=""${cur ? "" : " selected"}>未分類</option>`];
+    for (const c of cols) {
+      opts.push(
+        `<option value="${esc(c.id)}"${c.id === cur ? " selected" : ""}>${esc(c.name)}</option>`
+      );
+    }
+    return opts.join("");
   }
 
   function openProjectEntriesModal() {
@@ -1261,10 +1969,96 @@ const App = (() => {
   function renderProjectsList() {
     const box = $("#projects-list");
     if (!box) return;
-    const list = Storage.listProjects();
+    syncProjectsModalChrome();
+    if (state.projectsBrowseId == null) {
+      renderCollectionList(box);
+      return;
+    }
+    renderProjectItems(box, state.projectsBrowseId);
+  }
+
+  function renderCollectionList(box) {
+    const cols = Storage.listCollections();
+    const ungroupedN = Storage.countUngroupedProjects();
+    const active = Storage.getActiveProject();
+    const items = [];
+
+    for (const c of cols) {
+      const sum = Storage.summarizeCollection(c.id);
+      const current = active?.collectionId === c.id;
+      items.push({
+        kind: "collection",
+        id: c.id,
+        name: c.name,
+        current,
+        meta: [
+          `${sum.projectCount} 分項`,
+          `${sum.sentenceCount} 句`,
+          sum.lastProjectName ? `上次：${sum.lastProjectName}` : "",
+          c.updatedAt ? `更新 ${formatHistoryTime(c.updatedAt)}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      });
+    }
+    if (ungroupedN) {
+      const sum = Storage.summarizeCollection("");
+      items.push({
+        kind: "ungrouped",
+        id: "",
+        name: "未分類",
+        current: Boolean(active && !active.collectionId),
+        meta: [`${sum.projectCount} 分項`, `${sum.sentenceCount} 句`].join(" · "),
+      });
+    }
+
+    if (!items.length) {
+      box.innerHTML = `<p class="projects-empty">尚無大項。建立「歌詞」「小說」這類容器，再在裡面加分項（各章／各首歌）。</p>`;
+      return;
+    }
+
+    box.innerHTML = `<ul class="projects-list">${items
+      .map(
+        (it) => `
+          <li class="project-item is-folder${it.current ? " is-active" : ""}" data-kind="${
+            it.kind
+          }" data-id="${esc(it.id)}">
+            <div class="project-item-main">
+              <p class="project-item-name">${esc(it.name)}${it.current ? " · 使用中" : ""}</p>
+              <p class="project-item-meta">${esc(it.meta)}</p>
+            </div>
+            <div class="project-item-actions">
+              <button type="button" class="btn btn-sm btn-primary" data-col-open>打開</button>
+              ${
+                it.kind === "collection"
+                  ? `<button type="button" class="btn btn-sm btn-danger-ghost" data-col-delete>刪除</button>`
+                  : ""
+              }
+            </div>
+          </li>`
+      )
+      .join("")}</ul>`;
+
+    box.querySelectorAll(".project-item").forEach((li) => {
+      const id = li.dataset.id;
+      const open = () => {
+        state.projectsBrowseId = li.dataset.kind === "ungrouped" ? "" : id;
+        renderProjectsList();
+        $("#project-new-name")?.focus();
+      };
+      li.querySelector("[data-col-open]")?.addEventListener("click", open);
+      li.querySelector(".project-item-main")?.addEventListener("click", open);
+      li.querySelector("[data-col-delete]")?.addEventListener("click", () => {
+        deleteCollectionWithConfirm(id);
+      });
+    });
+  }
+
+  function renderProjectItems(box, collectionId) {
+    const list = Storage.listProjectsByCollection(collectionId);
     const activeId = Storage.getActiveProjectId();
     if (!list.length) {
-      box.innerHTML = `<p class="projects-empty">尚無專案。輸入名稱後按「建立」，適合歌詞、對話等連貫文本。</p>`;
+      box.innerHTML = `<p class="projects-empty">尚無分項。輸入名稱後按「建立分項」，再一次放入文本。</p>`;
       return;
     }
     box.innerHTML = `<ul class="projects-list">${list
@@ -1281,6 +2075,13 @@ const App = (() => {
               </p>
             </div>
             <div class="project-item-actions">
+              <label class="sr-only" for="proj-move-${esc(p.id)}">搬到大項</label>
+              <select
+                class="project-item-move"
+                id="proj-move-${esc(p.id)}"
+                data-proj-move
+                title="搬到其他大項"
+              >${collectionMoveOptionsHtml(p.collectionId)}</select>
               <button type="button" class="btn btn-sm btn-primary" data-proj-enter>
                 ${active ? "回到查詢" : "進入"}
               </button>
@@ -1297,12 +2098,25 @@ const App = (() => {
       li.querySelector("[data-proj-enter]")?.addEventListener("click", () => {
         enterProject(id);
       });
+      li.querySelector("[data-proj-move]")?.addEventListener("change", (e) => {
+        const next = e.target.value;
+        const moved = Storage.moveProject(id, next);
+        if (!moved) {
+          showToast("無法搬移", "error");
+          renderProjectsList();
+          return;
+        }
+        const dest = next ? Storage.getCollection(next)?.name : "未分類";
+        showToast(`已搬到「${dest || "未分類"}」`, "success");
+        updateProjectModeUI();
+        renderProjectsList();
+      });
       li.querySelector("[data-proj-delete]")?.addEventListener("click", () => {
         const p = Storage.getProject(id);
         if (!p) return;
         if (
           !confirm(
-            `確定刪除專案「${p.name}」？\n內含 ${(p.entries || []).length} 句將一併清除（無法復原）。`
+            `確定刪除分項「${p.name}」？\n內含 ${(p.entries || []).length} 句將一併清除（無法復原）。`
           )
         ) {
           return;
@@ -1316,9 +2130,35 @@ const App = (() => {
         }
         updateProjectModeUI();
         renderProjectsList();
-        showToast("已刪除專案", "info");
+        showToast("已刪除分項", "info");
       });
     });
+  }
+
+  function deleteCollectionWithConfirm(id) {
+    const c = Storage.getCollection(id);
+    if (!c) return;
+    const sum = Storage.summarizeCollection(id);
+    if (!confirm(`確定刪除大項「${c.name}」？\n內含 ${sum.projectCount} 個分項、${sum.sentenceCount} 句。`)) {
+      return;
+    }
+    const wipeKids = confirm(
+      `這 ${sum.projectCount} 個分項要怎麼處理？\n\n確定＝連同分項與句子全部刪除\n取消＝只刪大項，分項回到「未分類」`
+    );
+    if (wipeKids) {
+      const kids = Storage.listProjectsByCollection(id);
+      for (const p of kids) {
+        if (state.bulkImport?.running && state.bulkImport.projectId === p.id) {
+          cancelProjectBulkImport();
+        }
+      }
+    }
+    Storage.deleteCollection(id, { deleteChildren: wipeKids });
+    if (!Storage.getActiveProjectId()) state.projectCursorSeq = null;
+    if (state.projectsBrowseId === id) state.projectsBrowseId = null;
+    updateProjectModeUI();
+    renderProjectsList();
+    showToast(wipeKids ? `已刪除大項「${c.name}」與全部分項` : `已刪除大項「${c.name}」· 分項回到未分類`, "info");
   }
 
   /** 專案句子篩選：文字（原文／摘要／翻譯）或序號 */
@@ -1387,7 +2227,9 @@ const App = (() => {
     const entries = filterProjectEntries(all, filterQ);
 
     if (sub) {
-      sub.textContent = `「${project.name}」· 共 ${all.length} 句 · 序號永久固定，刪除後不重編`;
+      const col = project.collectionId ? Storage.getCollection(project.collectionId) : null;
+      const path = col ? `${col.name} › ${project.name}` : project.name;
+      sub.textContent = `「${path}」· 共 ${all.length} 句 · 序號永久固定，刪除後不重編`;
     }
     if (stat) {
       if (!all.length) {
@@ -1511,6 +2353,7 @@ const App = (() => {
       return;
     }
     Storage.setActiveProjectId(id);
+    if (p.collectionId) Storage.rememberCollectionLastProject(p.collectionId, id);
     state.projectCursorSeq = null;
     closeProjectsModal();
     setView("lookup");
@@ -1557,14 +2400,73 @@ const App = (() => {
     const input = $("#project-new-name");
     const name = String(input?.value || "").trim();
     if (!name) {
-      showToast("請輸入專案名稱", "error");
+      showToast(state.projectsBrowseId == null ? "請輸入大項名稱" : "請輸入分項名稱", "error");
       input?.focus();
       return;
     }
-    const p = Storage.createProject(name);
+    if (state.projectsBrowseId == null) {
+      const c = Storage.createCollection(name);
+      if (input) input.value = "";
+      state.projectsBrowseId = c.id;
+      renderProjectsList();
+      showToast(`已建立大項「${c.name}」· 可再加分項`, "success");
+      input?.focus();
+      return;
+    }
+    const p = Storage.createProject(name, { collectionId: state.projectsBrowseId || "" });
     if (input) input.value = "";
     renderProjectsList();
-    showToast(`已建立「${p.name}」`, "success");
+    showToast(`已建立分項「${p.name}」`, "success");
+  }
+
+  function commitCollectionRenameFromCrumb() {
+    const el = $("#projects-crumb-current");
+    const col = browsingCollection();
+    if (!el || !col) return;
+    const next = String(el.textContent || "").replace(/\s+/g, " ").trim();
+    if (!next) {
+      el.textContent = col.name || "未命名";
+      showToast("大項名稱不能空白", "error");
+      return;
+    }
+    if (next === String(col.name || "").trim()) {
+      el.textContent = col.name || next;
+      return;
+    }
+    const updated = Storage.renameCollection(col.id, next);
+    el.textContent = updated?.name || next;
+    updateProjectModeUI();
+    renderProjectsList();
+    showToast(`已改名為「${updated?.name || next}」`, "success");
+  }
+
+  function bindCollectionCrumbRename() {
+    const el = $("#projects-crumb-current");
+    if (!el || el.dataset.renameBound === "1") return;
+    el.dataset.renameBound = "1";
+    let snapshot = "";
+    el.addEventListener("focus", () => {
+      snapshot = String(el.textContent || "");
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.isComposing) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        el.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        el.textContent = snapshot;
+        el.blur();
+      }
+    });
+    el.addEventListener("paste", (e) => {
+      e.preventDefault();
+      const text = String((e.clipboardData || window.clipboardData)?.getData("text") || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text) document.execCommand("insertText", false, text);
+    });
+    el.addEventListener("blur", () => commitCollectionRenameFromCrumb());
   }
 
 
@@ -1639,6 +2541,120 @@ const App = (() => {
     });
   }
 
+  function readApiFieldsFromForm() {
+    return {
+      apiKey: $("#settings-api-key")?.value || "",
+      baseUrl: $("#settings-base-url")?.value || "",
+      model: $("#settings-model")?.value || "",
+    };
+  }
+
+  function renderApiProviderUI(s) {
+    const settings = s || Storage.loadSettings();
+    const providers = Storage.API_PROVIDERS || [];
+    const curId =
+      typeof Storage.inferApiProviderId === "function"
+        ? Storage.inferApiProviderId(settings)
+        : settings.apiProvider || "grok";
+    const preset =
+      typeof Storage.getApiProvider === "function"
+        ? Storage.getApiProvider(curId)
+        : providers.find((p) => p.id === curId) || providers[0] || {};
+    const box = $("#settings-api-provider");
+    if (box) {
+      box.innerHTML = providers
+        .map((p) => {
+          const hasKey = Boolean(settings.apiProfiles?.[p.id]?.apiKey);
+          const active = p.id === curId;
+          return `<button type="button" class="api-provider-pill${
+            active ? " is-active" : ""
+          }" data-api-provider="${esc(p.id)}" aria-pressed="${active ? "true" : "false"}">
+            ${esc(p.label)}${
+              hasKey ? `<span class="api-provider-keydot" title="已保存金鑰"></span>` : ""
+            }
+          </button>`;
+        })
+        .join("");
+    }
+    const hint = $("#settings-provider-hint");
+    if (hint) {
+      hint.innerHTML =
+        `${esc(preset.hint || "")}。切換服務時各家金鑰分開保存在本機。` +
+        (preset.signup
+          ? ` 申請：<a href="${esc(preset.signup)}" target="_blank" rel="noopener noreferrer">${esc(
+              preset.signupLabel || preset.signup
+            )}</a>`
+          : "");
+    }
+    const keyHint = $("#settings-api-key-hint");
+    if (keyHint && preset.signup) {
+      keyHint.innerHTML =
+        `金鑰存在本機瀏覽器 localStorage，不會上傳到本專案伺服器。請勿在公用電腦儲存。申請：<a href="${esc(
+          preset.signup
+        )}" target="_blank" rel="noopener noreferrer">${esc(preset.signupLabel || preset.signup)}</a>`;
+    }
+    const keyInput = $("#settings-api-key");
+    if (keyInput) keyInput.placeholder = preset.keyPlaceholder || "API Key";
+    const urlInput = $("#settings-base-url");
+    if (urlInput) {
+      urlInput.readOnly = Boolean(preset.urlLocked);
+      urlInput.placeholder = preset.baseUrl || "https://";
+    }
+    const urlHint = $("#settings-base-url-hint");
+    if (urlHint) {
+      urlHint.innerHTML = preset.urlLocked
+        ? `此服務使用固定端點 <code>${esc(preset.baseUrl)}</code>（OpenAI 相容）`
+        : "請填寫 OpenAI 相容的 Base URL（不含尾端 <code>/chat/completions</code>）。";
+    }
+    const modelInput = $("#settings-model");
+    if (modelInput) modelInput.placeholder = preset.defaultModel || "模型名稱";
+    const chips = $("#settings-model-shortcuts");
+    const models = Array.isArray(preset.models) ? preset.models : [];
+    const curModel = String(settings.model || "").trim();
+    if (chips) {
+      chips.hidden = !models.length;
+      chips.innerHTML = models
+        .map(
+          (m) =>
+            `<button type="button" class="model-chip${
+              m.id === curModel ? " is-active" : ""
+            }" data-model-id="${esc(m.id)}">${esc(m.label)}</button>`
+        )
+        .join("");
+    }
+  }
+
+  function switchApiProvider(id) {
+    if (typeof Storage.switchApiProvider !== "function") return;
+    const next = Storage.switchApiProvider(id, readApiFieldsFromForm());
+    fillSettingsForm();
+    updateApiStatusDot();
+    const label = (Storage.getApiProvider && Storage.getApiProvider(id)?.label) || id;
+    const hasKey = Boolean(next.apiKey);
+    showToast(
+      hasKey ? `已切換 ${label}（已還原該服務金鑰）` : `已切換 ${label}（此服務尚未填金鑰）`,
+      hasKey ? "success" : "info"
+    );
+  }
+
+  function applyModelShortcut(modelId) {
+    const input = $("#settings-model");
+    if (!input || !modelId) return;
+    input.value = modelId;
+    Storage.saveSettings({ ...readApiFieldsFromForm(), model: modelId });
+    renderApiProviderUI();
+    const s = Storage.loadSettings();
+    const modes = Storage.loadLookupModes();
+    const prov = Storage.getApiProvider ? Storage.getApiProvider(s.apiProvider) : null;
+    setSettingsStatus(
+      `已填入模型 ${modelId}` +
+        (prov ? ` · ${prov.label}` : "") +
+        (s.apiKey ? ` · Key ${maskKey(s.apiKey)}` : "") +
+        ` · ${Storage.formatLookupModesLabel(modes)}`,
+      s.apiKey ? "ok" : "warn"
+    );
+  }
+
   function fillSettingsForm() {
     const s = Storage.loadSettings();
     $("#settings-api-key").value = s.apiKey || "";
@@ -1648,19 +2664,27 @@ const App = (() => {
     if (input) input.type = "password";
     const toggle = $("#btn-toggle-key");
     if (toggle) toggle.textContent = "顯示";
+    renderApiProviderUI(s);
+    syncApiTtsSwitch(s);
     updateLookupModeUI();
     const modes = Storage.loadLookupModes();
     const modeLabel = Storage.formatLookupModesLabel(modes);
     const needApi = modes.apiGrammar || modes.apiVocab;
+    const prov =
+      typeof Storage.getApiProvider === "function"
+        ? Storage.getApiProvider(s.apiProvider)
+        : null;
+    const provLabel = prov?.label ? `${prov.label} · ` : "";
     if (s.apiKey) {
       setSettingsStatus(
-        `已設定 API Key（${maskKey(s.apiKey)}）· 模型 ${s.model} · ${modeLabel}`,
+        `已設定 ${provLabel}API Key（${maskKey(s.apiKey)}）· 模型 ${s.model} · ${modeLabel}`,
         "ok"
       );
     } else if (needApi) {
-      setSettingsStatus("尚未設定 API Key — API 文法／單字與 AI 填寫無法使用", "warn");
-    } else if (modes.localGrammar) {
-      setSettingsStatus("本地文法排查 · 無需 Key；AI 自動填寫仍需 API Key", "ok");
+      setSettingsStatus(
+        `尚未設定 ${provLabel}API Key — API 文法／單字與 AI 填寫無法使用`,
+        "warn"
+      );
     } else {
       setSettingsStatus("手動模式 · 可查詢並選字套用（未開掃描）", "ok");
     }
@@ -1668,25 +2692,54 @@ const App = (() => {
     renderThemePicker(s.structureTheme);
     renderStructureThemePreview();
     updateKiwiStatusUI();
+    updateSettingsStorageUsage();
+  }
+
+  function updateSettingsStorageUsage() {
+    const el = $("#settings-storage-usage");
+    if (!el || typeof Storage.measureLocalStorageUsage !== "function") return;
+    const u = Storage.measureLocalStorageUsage();
+    const pct = Math.round(u.pct * 100);
+    const backend =
+      u.backend || (typeof Storage.getProjectsBackend === "function" ? Storage.getProjectsBackend() : "");
+    const top = (u.rows || [])
+      .slice(0, 3)
+      .filter((r) => r.key !== "kgn_projects_v1" || backend !== "idb")
+      .map((r) => `${r.key.replace(/^(.{18}).+$/, "$1…")} ${Storage.formatStorageBytes(r.bytes)}`)
+      .join(" · ");
+    let line = `localStorage 約 ${u.totalLabel}／${u.quotaLabel}（${pct}%）`;
+    if (backend === "idb") {
+      line += ` · 專案句子 IndexedDB ${u.idbLabel || "0 B"}（不受 5MB 上限）`;
+    } else if (u.app) {
+      line += ` · 文法筆記本 ${u.appLabel}`;
+    }
+    if (u.level === "full") {
+      line +=
+        backend === "idb"
+          ? " · localStorage 已接近上限（規則／設定／其他網站資料）；專案句子已在 IndexedDB。"
+          : " · 已接近上限，整批分析容易寫不進去。可匯出後刪舊專案／清空歷史。";
+    } else if (u.level === "warn" && backend !== "idb") {
+      line += " · 偏高，歌詞專案含切詞快照會很快塞滿。";
+    }
+    if (top) line += ` 最大：${top}`;
+    el.textContent = line;
   }
 
   function readLookupModesFromForm() {
     return {
       apiGrammar: Boolean($("#settings-mode-api-grammar")?.checked),
-      localGrammar: Boolean($("#settings-mode-local-grammar")?.checked),
+      localGrammar: false,
       apiVocab: Boolean($("#settings-mode-api-vocab")?.checked),
     };
   }
 
-  function onLookupModeToggle(changed) {
+  function onLookupModeToggle() {
     const raw = readLookupModesFromForm();
-    if (changed === "apiGrammar" && raw.apiGrammar) raw.localGrammar = false;
-    if (changed === "localGrammar" && raw.localGrammar) raw.apiGrammar = false;
     const modes = Storage.saveLookupModes(raw);
     updateLookupModeUI();
     const label = Storage.formatLookupModesLabel(modes);
     const needApi = modes.apiGrammar || modes.apiVocab;
-    if (!modes.apiGrammar && !modes.localGrammar && !modes.apiVocab) {
+    if (!modes.apiGrammar && !modes.apiVocab) {
       setSettingsStatus("手動模式 · 可查詢並選字套用", "ok");
       showToast("已關閉掃描 · 仍可查詢並手動套用規則", "info");
     } else if (needApi && !Storage.hasApiKey()) {
@@ -1702,13 +2755,11 @@ const App = (() => {
     e?.preventDefault();
     const themeBtn = $("#structure-theme-picker .theme-card.active");
     const raw = readLookupModesFromForm();
-    if (raw.apiGrammar && raw.localGrammar) raw.localGrammar = false;
     const modes = Storage.saveLookupModes(raw);
     const next = Storage.saveSettings({
-      apiKey: $("#settings-api-key").value,
-      baseUrl: $("#settings-base-url").value,
-      model: $("#settings-model").value,
+      ...readApiFieldsFromForm(),
       kiwiEnabled: $("#settings-kiwi-enabled") ? Boolean($("#settings-kiwi-enabled").checked) : true,
+      apiTtsEnabled: Boolean($("#settings-api-tts")?.checked),
       structureTheme:
         themeBtn?.dataset?.themeId ||
         document.documentElement.getAttribute("data-structure-theme") ||
@@ -1717,11 +2768,16 @@ const App = (() => {
     });
     applyStructureTheme(next.structureTheme);
     updateLookupModeUI();
+    renderApiProviderUI(next);
     const modeLabel = Storage.formatLookupModesLabel(modes);
     const needApi = modes.apiGrammar || modes.apiVocab;
+    const provLabel =
+      typeof Storage.getApiProvider === "function"
+        ? `${Storage.getApiProvider(next.apiProvider).label} · `
+        : "";
     if (next.apiKey) {
       setSettingsStatus(
-        `已儲存（${maskKey(next.apiKey)}）· 模型 ${next.model} · ${modeLabel}`,
+        `已儲存 ${provLabel}（${maskKey(next.apiKey)}）· 模型 ${next.model} · ${modeLabel}`,
         "ok"
       );
       showToast("設定已儲存", "success");
@@ -1735,11 +2791,7 @@ const App = (() => {
   }
 
   async function testApiConnection() {
-    Storage.saveSettings({
-      apiKey: $("#settings-api-key").value,
-      baseUrl: $("#settings-base-url").value,
-      model: $("#settings-model").value,
-    });
+    Storage.saveSettings(readApiFieldsFromForm());
     updateApiStatusDot();
     const btn = $("#btn-test-api");
     if (btn) btn.disabled = true;
@@ -1757,11 +2809,17 @@ const App = (() => {
   }
 
   function clearApiKey() {
-    if (!confirm("確定清除本機儲存的 API Key？")) return;
+    const s = Storage.loadSettings();
+    const label =
+      typeof Storage.getApiProvider === "function"
+        ? Storage.getApiProvider(s.apiProvider).label
+        : "目前服務";
+    if (!confirm(`確定清除「${label}」的 API Key？其他服務已保存的金鑰會保留。`)) return;
     Storage.clearApiKey();
     $("#settings-api-key").value = "";
     updateApiStatusDot();
-    setSettingsStatus("API Key 已清除", "warn");
+    renderApiProviderUI();
+    setSettingsStatus(`${label} 的 API Key 已清除`, "warn");
     showToast("已清除 API Key", "info");
   }
 
@@ -1806,6 +2864,9 @@ const App = (() => {
 
     state.editingId = rule?.id || null;
     state.todoSourceId = draft?.todoId || null;
+    if (!draft?.fromInventory) {
+      state.pendingCreateFromInventory = null;
+    }
     fillCategorySelect(rule?.category || draft?.category || "");
     $("#form-heading").textContent = rule ? "編輯規則" : "新增規則";
     $("#form-title").value = rule?.title || draft?.title || "";
@@ -2052,60 +3113,82 @@ const App = (() => {
 
   function saveForm(e) {
     e?.preventDefault();
+    e?.stopPropagation?.();
     const data = readForm();
     if (!data.title) {
       showToast("請填寫規則名", "error");
+      $("#form-title")?.focus();
       return;
     }
+    const wasEdit = Boolean(state.editingId);
+    const pending = state.pendingSelApply;
+    const pendingSupp = state.pendingSupplementaryApply;
+    const pendingInv = state.pendingCreateFromInventory;
+    if (pendingSupp) {
+      data.category = RulesService.SUPPLEMENTARY_CATEGORY || "補充用法";
+    }
+    let saved;
     try {
-      const wasEdit = Boolean(state.editingId);
-      const pending = state.pendingSelApply;
-      const pendingSupp = state.pendingSupplementaryApply;
-      let saved;
       if (state.editingId) {
         saved = RulesService.update(state.editingId, data);
       } else {
         saved = RulesService.create(data);
       }
-      const cleared = clearTodosAfterRuleSaved(data.title || saved?.title);
-      state.editingId = null;
-      state.todoSourceId = null;
-      state.pendingSelApply = null;
-      state.pendingSupplementaryApply = false;
-      // 儲存成功後收起 AI 狀態列
-      if (state.aiJob && state.aiJob.status !== "running") {
-        setAiJobBar("hidden");
-        state.aiJob = null;
-      }
-      updateRuleCount();
+    } catch (err) {
+      showToast(err.message || "儲存失敗", "error");
+      return;
+    }
+    if (!saved) {
+      showToast("儲存失敗", "error");
+      return;
+    }
 
-      if (!wasEdit && pending && saved && state.lastInventory) {
+    const cleared = clearTodosAfterRuleSaved(data.title || saved.title);
+    state.editingId = null;
+    state.todoSourceId = null;
+    state.pendingSelApply = null;
+    state.pendingSupplementaryApply = false;
+    state.pendingCreateFromInventory = null;
+    // 儲存成功後收起 AI 狀態列
+    if (state.aiJob && state.aiJob.status !== "running") {
+      setAiJobBar("hidden");
+      state.aiJob = null;
+    }
+    updateRuleCount();
+
+    const extra = cleared ? ` · 已清 ${cleared} 筆待辦` : "";
+    try {
+      if (!wasEdit && pending && state.lastInventory) {
         setView("lookup");
         addRuleToCurrentResult(saved, pending.text, pending.start, pending.end);
-        const extra = cleared ? ` · 已清 ${cleared} 筆待辦` : "";
         showToast(`規則已建立並套用到「${pending.text}」${extra}`, "success");
         return;
       }
 
-      if (!wasEdit && pendingSupp && saved && state.lastQuery) {
+      if (!wasEdit && pendingSupp && state.lastQuery) {
         setView("lookup");
         addSupplementaryRuleToCurrent(saved);
-        const extra = cleared ? ` · 已清 ${cleared} 筆待辦` : "";
         showToast(`補充用法已建立並加入本句${extra}`, "success");
+        return;
+      }
+
+      if (!wasEdit && pendingInv && state.lastInventory) {
+        attachCreatedRuleToInventoryItem(saved, pendingInv);
+        setView("lookup");
+        refreshLookupFromInventory();
+        requestAnimationFrame(() => scrollToOwnedRuleOnLookup(saved.id));
+        showToast(`規則已建立並套用到本句${extra}`, "success");
         return;
       }
 
       if (state.lastQuery && state.lastInventory) {
         setView("lookup");
-        applyInventoryToLookup(state.lastQuery, state.lastInventory);
+        refreshLookupFromInventory();
+        if (!wasEdit) {
+          requestAnimationFrame(() => scrollToOwnedRuleOnLookup(saved.id));
+        }
         showToast(
-          wasEdit
-            ? cleared
-              ? `規則已更新 · 已清 ${cleared} 筆待辦`
-              : "規則已更新"
-            : cleared
-              ? `規則已新增 · 已清 ${cleared} 筆待辦`
-              : "規則已新增",
+          wasEdit ? `規則已更新${extra}` : `規則已新增${extra}`,
           "success"
         );
         return;
@@ -2113,17 +3196,16 @@ const App = (() => {
 
       setView("rules");
       showToast(
-        wasEdit
-          ? cleared
-            ? `規則已更新，並清除 ${cleared} 筆待辦`
-            : "規則已更新"
-          : cleared
-            ? `規則已新增，並清除 ${cleared} 筆待辦`
-            : "規則已新增",
+        wasEdit ? `規則已更新${extra}` : `規則已新增${extra}`,
         "success"
       );
     } catch (err) {
-      showToast(err.message || "儲存失敗", "error");
+      console.warn("[saveForm] UI refresh", err);
+      setView(state.lastQuery ? "lookup" : "rules");
+      showToast(
+        `規則已儲存，但畫面更新失敗：${err.message || "未知錯誤"}。可到筆記本查看。`,
+        "info"
+      );
     }
   }
 
@@ -2161,6 +3243,15 @@ const App = (() => {
     if (state.aiJob) {
       state.editingId = state.aiJob.editingId;
       state.todoSourceId = state.aiJob.todoSourceId;
+      if (state.aiJob.pendingCreateFromInventory) {
+        state.pendingCreateFromInventory = state.aiJob.pendingCreateFromInventory;
+      }
+      if (state.aiJob.pendingSelApply) {
+        state.pendingSelApply = state.aiJob.pendingSelApply;
+      }
+      if (state.aiJob.pendingSupplementaryApply) {
+        state.pendingSupplementaryApply = state.aiJob.pendingSupplementaryApply;
+      }
     }
     setView("form");
     if (state.aiJob?.status === "done" || state.aiJob?.status === "error") {
@@ -2206,6 +3297,9 @@ const App = (() => {
       title,
       editingId: state.editingId,
       todoSourceId: state.todoSourceId,
+      pendingCreateFromInventory: state.pendingCreateFromInventory,
+      pendingSelApply: state.pendingSelApply,
+      pendingSupplementaryApply: state.pendingSupplementaryApply,
       status: "running",
     };
     state.aiJob = job;
@@ -2239,11 +3333,27 @@ const App = (() => {
         // 還原編輯身分後寫入表單（DOM 在 hidden 的 view-form 仍保留）
         state.editingId = job.editingId;
         state.todoSourceId = job.todoSourceId;
+        if (job.pendingCreateFromInventory) {
+          state.pendingCreateFromInventory = job.pendingCreateFromInventory;
+        }
+        if (job.pendingSelApply) state.pendingSelApply = job.pendingSelApply;
+        if (job.pendingSupplementaryApply) {
+          state.pendingSupplementaryApply = job.pendingSupplementaryApply;
+        }
         if (draft.title) $("#form-title").value = draft.title;
         $("#form-explanation").value = draft.explanation || "";
         $("#form-structure").value = draft.structure || "";
         updateStructurePreview();
-        if (draft.category) fillCategorySelect(draft.category);
+        const keepSupp =
+          job.pendingSupplementaryApply ||
+          $("#form-category")?.value === "補充用法" ||
+          (typeof RulesService.isSupplementaryUsage === "function" &&
+            RulesService.isSupplementaryUsage(draft.category));
+        if (keepSupp) {
+          fillCategorySelect("補充用法");
+        } else if (draft.category) {
+          fillCategorySelect(draft.category);
+        }
         if (banner) {
           banner.className = "result-banner success";
           banner.innerHTML = `<strong>AI 已填寫</strong> — 請核對說明與結構式後再儲存。`;
@@ -2315,7 +3425,14 @@ const App = (() => {
    */
   function ruleCardHtml(
     rule,
-    { compact = false, tint = -1, extra = "", mode = "notebook", hasSpan = null } = {}
+    {
+      compact = false,
+      tint = -1,
+      extra = "",
+      mode = "notebook",
+      hasSpan = null,
+      generatedIdx = null,
+    } = {}
   ) {
     const isSupp =
       tint === "usage" ||
@@ -2337,12 +3454,16 @@ const App = (() => {
         )}</span>`
       : "";
     const isLookup = mode === "lookup";
+    const isGenerated = generatedIdx != null && Number(generatedIdx) >= 0;
     const effectiveHasSpan = isSupp ? null : hasSpan;
     const unlocatedBadge =
       isLookup && effectiveHasSpan === false
         ? `<span class="badge badge-api-fallback">句中未定位</span>`
         : "";
-    const badgesHtml = [catBadge, unlocatedBadge].filter(Boolean).join("");
+    const missingBadge = isGenerated
+      ? `<span class="badge badge-missing">尚未收錄</span>`
+      : "";
+    const badgesHtml = [catBadge, missingBadge, unlocatedBadge].filter(Boolean).join("");
     const locateBtn =
       isLookup && effectiveHasSpan !== null
         ? effectiveHasSpan === false
@@ -2374,7 +3495,20 @@ const App = (() => {
           </div>
         </div>`;
     }
-    const actions = isLookup
+    const actions = isGenerated
+      ? `<button type="button" class="btn btn-sm btn-primary" data-save-draft-idx="${esc(
+          String(generatedIdx)
+        )}" title="把這張生成卡寫入筆記本，並套用到本句">收入筆記本</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-create-inv-idx="${esc(
+            String(generatedIdx)
+          )}" title="先開表單核對再建立">編輯後建立</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-add-todo-idx="${esc(
+            String(generatedIdx)
+          )}">加入待辦</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-dismiss-inv-idx="${esc(
+            String(generatedIdx)
+          )}" title="從本句結果移除（不刪筆記本）">本句忽略</button>`
+      : isLookup
       ? `<button type="button" class="btn btn-sm btn-secondary" data-edit="${esc(rule.id)}">編輯</button>
           ${locateBtn}
           <button type="button" class="btn btn-sm btn-danger-ghost" data-detach-rule="${esc(
@@ -2426,7 +3560,10 @@ const App = (() => {
         continue;
       }
       // 已有規則則跳過
-      const match = RulesService.findMatchingRule(it);
+      const match =
+        typeof RulesService.findInventoryRule === "function"
+          ? RulesService.findInventoryRule(it)
+          : RulesService.findMatchingRule(it);
       if (match.owned) {
         skipped++;
         continue;
@@ -2509,10 +3646,14 @@ const App = (() => {
       li.querySelector("[data-create]")?.addEventListener("click", () => {
         const item = Storage.loadTodos().find((t) => t.id === id);
         if (!item) return;
+        const pending = captureInventoryPendingByTitle(item.title);
+        if (pending) state.pendingCreateFromInventory = pending;
         // 新規則只帶名稱（其餘由使用者／AI 自動填寫再補）
         openForm(null, {
           todoId: item.id,
           title: item.title,
+          category: item.category || pending?.category || "",
+          fromInventory: Boolean(pending),
           banner: `<strong>由待辦建立</strong> — ${esc(item.title)}（儲存後會自動移出待辦）`,
         });
       });
@@ -2605,7 +3746,7 @@ const App = (() => {
           <h3>已收錄的規則</h3>
           <span class="badge badge-local">${orderedHits.length} 筆 · 與句中同色</span>
         </div>
-        <p class="panel-note lookup-edit-hint">API 可能誤判。操作列：編輯 · 手動定位／重新定位 · 本句移除。選字可套用／疊加規則。<strong>補充用法</strong>為琥珀標、固定在後、不句中上色。</p>
+        <p class="panel-note lookup-edit-hint">已掛上的筆記本規則即使句中未定位也會留卡。操作列：編輯 · 手動定位／重新定位 · 本句移除。選字可套用／疊加規則。<strong>補充用法</strong>為琥珀標、固定在後、不句中上色。</p>
         <div class="match-list">
           ${orderedHits
             .map((h) => {
@@ -2654,12 +3795,30 @@ const App = (() => {
       const r = RulesService.getById(it.manualRuleId);
       if (r) return { owned: true, rule: r, score: 100, manual: true };
     }
-    const match = RulesService.findMatchingRule(it);
+    if (it?.localRuleId) {
+      const r = RulesService.getById(it.localRuleId);
+      if (r) return { owned: true, rule: r, score: 100, manual: false };
+    }
+    const match =
+      typeof RulesService.findInventoryRule === "function"
+        ? RulesService.findInventoryRule(it)
+        : RulesService.findMatchingRule(it);
+    if (match?.owned && match.rule && it && !it.manualRuleId) {
+      const title = String(match.rule.title || "").trim();
+      if (title) {
+        it.name = title;
+        if (typeof RulesService.parseBilingualTitle === "function") {
+          const p = RulesService.parseBilingualTitle(title);
+          if (p.zh) it.nameZh = p.zh;
+          if (p.ko) it.nameKo = p.ko;
+        }
+      }
+    }
     return { ...match, manual: false };
   }
 
   /** 在原文中定位項目；手動指定 start/end 時優先使用 */
-  function locateInventoryItemInText(src, it) {
+  function locateInventoryItemInText(src, it, tokens) {
     const text = String(src || "");
     const start = Number(it?.start);
     const end = Number(it?.end);
@@ -2690,30 +3849,77 @@ const App = (() => {
         ) {
           // 改走合法表面搜尋
           if (RulesService.locateApiItemInText) {
-            return RulesService.locateApiItemInText(text, it);
+            return RulesService.locateApiItemInText(text, it, tokens);
           }
           return [];
         }
       }
-      return [
-        {
-          start,
-          end,
-          text: slice,
-          needle: String(it.span || slice),
-          fusionNote: "",
-        },
-      ];
+      const loc = {
+        start,
+        end,
+        text: slice,
+        needle: String(it.span || slice),
+        fusionNote: "",
+      };
+      const bypassGate = it.source === "manual" || it.locatedManually;
+      if (
+        !bypassGate &&
+        typeof AffixGate !== "undefined" &&
+        AffixGate.accept
+      ) {
+        const owned =
+          it.manualRuleId && RulesService.getById
+            ? { owned: true, rule: RulesService.getById(it.manualRuleId) }
+            : RulesService.findInventoryRule
+              ? RulesService.findInventoryRule(it)
+              : RulesService.findMatchingRule
+                ? RulesService.findMatchingRule(it)
+              : { rule: null };
+        const rule = owned && owned.rule ? owned.rule : null;
+        const profile = AffixGate.inferProfile(rule, it);
+        if (profile && !AffixGate.accept(text, loc, profile, { item: it, tokens })) {
+          if (RulesService.locateApiItemInText) {
+            return RulesService.locateApiItemInText(text, it, tokens);
+          }
+          return [];
+        }
+      }
+      return [loc];
     }
     if (RulesService.locateApiItemInText) {
-      return RulesService.locateApiItemInText(text, it);
+      return RulesService.locateApiItemInText(text, it, tokens);
     }
     return [];
   }
 
   function buildApiHighlight(query, inventory) {
     const src = String(query || "");
-    const items = inventory?.items || [];
+    const rawItems = inventory?.items || [];
+    // 舊歷史快照可能尚未保存 kiwiKind；用現有 token 重新附上精確區間的
+    // 高信心形態見證，讓重新開啟舊句時也能套用最新的防錯配規則。
+    const morphCandidates =
+      Array.isArray(inventory?.tokens) &&
+      inventory.tokens.length &&
+      typeof KoParse !== "undefined" &&
+      typeof KoParse.deterministicFunctions === "function"
+        ? KoParse.deterministicFunctions(src, inventory.tokens)
+        : [];
+    const witnessedItems = rawItems.map((it) => {
+      if (it?.kiwiKind) return it;
+      const witness = morphCandidates.find(
+        (c) =>
+          !c.needsDisambiguation &&
+          Number.isFinite(Number(it?.tokenFrom)) &&
+          Number.isFinite(Number(it?.tokenTo)) &&
+          Number(c.tokenFrom) === Number(it.tokenFrom) &&
+          Number(c.tokenTo) === Number(it.tokenTo)
+      );
+      return witness ? { ...it, kiwiKind: witness.kiwiKind } : it;
+    });
+    const items =
+      typeof KoParse !== "undefined" && KoParse.narrowItemToMarker
+        ? witnessedItems.map((it) => KoParse.narrowItemToMarker(src, it, inventory?.tokens))
+        : witnessedItems;
     const spans = [];
     const legend = [];
     const ownedHits = [];
@@ -2721,19 +3927,56 @@ const App = (() => {
     let colorIdx = 0;
     const colorByRule = new Map();
     const ownedSeen = new Set();
+    const vocabLocsForMan = locateVocabInText(src, inventory?.vocab);
+    let ownedPointCount = 0;
+    let rejectedCount = Number(inventory?.apiRejectedCount) || 0;
+    const unresolvedCount = Number(inventory?.unresolvedGrammarCount) || 0;
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       const match = resolveInventoryRule(it);
       let owned = Boolean(match.owned && match.rule);
+      const isSuppEarly =
+        (typeof RulesService.isSupplementaryUsage === "function" &&
+          (RulesService.isSupplementaryUsage(match.rule) ||
+            RulesService.isSupplementaryUsage(it))) ||
+        it.source === "manual" ||
+        Boolean(it.manualRuleId);
+      const witness =
+        !isSuppEarly &&
+        it.source !== "manual" &&
+        !it.locatedManually &&
+        typeof RulesService.morphWitness === "function"
+          ? RulesService.morphWitness(src, it, match.rule, inventory?.tokens)
+          : "none";
+      if (witness === "miss") {
+        rejectedCount += 1;
+        continue;
+      }
 
-      // 母音縮約：句中無該系合法表面（해／해요／보여…）→ 視為 API 誤報，整項捨棄
-      // （不顯示「已收錄」卡，也不丟到「尚未收錄」；手動套用除外）
+      // API 偶爾會把同形語尾誤對到某張詞彙／特定用法卡；若卡名中的
+      // 完整韓語詞根本不在原句，整項視為誤報，不列已收錄也不列缺失。
+      // 使用者從「尚未收錄」建立／手動套用的項目不要再用這道閘丟掉。
       if (
         owned &&
         match.rule &&
         it.source !== "manual" &&
         !it.manualRuleId &&
+        !it.locatedManually &&
+        typeof RulesService.ruleHasLiteralSurfaceWitness === "function" &&
+        !RulesService.ruleHasLiteralSurfaceWitness(match.rule, src)
+      ) {
+        rejectedCount += 1;
+        continue;
+      }
+
+      // 母音縮約：句中無該系合法表面（해／해요／보여／돼…）→ 視為 API 誤報，整項捨棄
+      // 僅使用者手動套用可例外；Kiwi 自動掛上的 manualRuleId 仍要過這關。
+      if (
+        owned &&
+        match.rule &&
+        it.source !== "manual" &&
+        !it.locatedManually &&
         typeof RulesService.isVowelContractionRule === "function" &&
         RulesService.isVowelContractionRule(match.rule)
       ) {
@@ -2753,12 +3996,49 @@ const App = (() => {
               typeof RulesService.isValidVowelSurface === "function" &&
               RulesService.isValidVowelSurface(form, it.span)));
         if (!hasSurf) {
+          rejectedCount += 1;
           continue;
         }
       }
 
       if (!owned) {
         missingItems.push({ it, invIdx: i });
+        const isSuppMiss =
+          typeof RulesService.isSupplementaryUsage === "function" &&
+          RulesService.isSupplementaryUsage(it);
+        if (!isSuppMiss) {
+          const foundMiss = locateInventoryItemInText(src, it, inventory?.tokens);
+          const prevMiss = legend.find((h) => !h.owned && h.name === it.name);
+          if (prevMiss) {
+            if (foundMiss.length) prevMiss.hasSpan = true;
+          } else {
+            legend.push({
+              invIdx: i,
+              name: it.name,
+              owned: false,
+              ruleId: "",
+              ruleTitle: it.name,
+              color: "missing",
+              hasSpan: foundMiss.length > 0,
+              supplementary: false,
+            });
+          }
+          for (const loc of foundMiss) {
+            spans.push({
+              start: loc.start,
+              end: loc.end,
+              text: loc.text,
+              ruleId: `missing-${i}`,
+              ruleTitle: it.name,
+              missing: true,
+              color: "missing",
+              apiName: it.name,
+              invIdx: i,
+              needle: loc.needle || it.span || it.nameKo || "",
+              fusionNote: loc.fusionNote || "",
+            });
+          }
+        }
         continue;
       }
 
@@ -2777,7 +4057,51 @@ const App = (() => {
         color = colorByRule.get(rule.id);
       }
 
-      const found = isSupp ? [] : locateInventoryItemInText(src, it);
+      const hadDirectCoords =
+        Number.isFinite(Number(it.start)) &&
+        Number.isFinite(Number(it.end)) &&
+        Number(it.end) > Number(it.start);
+      if (
+        it.source !== "manual" &&
+        !it.manualRuleId &&
+        !it.locatedManually &&
+        typeof RulesService.eulFrameWitness === "function" &&
+        RulesService.eulFrameWitness(src, match.rule || it) === "miss"
+      ) {
+        rejectedCount += 1;
+        continue;
+      }
+      let found = isSupp ? [] : locateInventoryItemInText(src, it, inventory?.tokens);
+      if (
+        found.length &&
+        typeof RulesService.filterHitsAgainstVocab === "function"
+      ) {
+        found = RulesService.filterHitsAgainstVocab(src, found, rule, vocabLocsForMan);
+      }
+      // 誤把詞中 만（가만히）當限定助詞：定位不到就整項丟掉（手動套用除外）
+      if (
+        !found.length &&
+        it.source !== "manual" &&
+        !it.locatedManually &&
+        typeof RulesService.isLimitManParticleRule === "function" &&
+        RulesService.isLimitManParticleRule(rule)
+      ) {
+        rejectedCount += 1;
+        continue;
+      }
+      // 本地自動掃到、句中卻定位不到 → 不當「本句文法」（避免 듯이／고 싶다 等灌進圖例）
+      if (
+        !found.length &&
+        it.source === "local" &&
+        !it.locatedManually &&
+        !it.manualRuleId
+      ) {
+        rejectedCount += 1;
+        continue;
+      }
+      // 已掛上本地卡：句中未定位仍顯示卡（標「句中未定位」），不再整張丟掉。
+
+      ownedPointCount += 1;
 
       // 同一規則只一則圖例；任一定位成功即 hasSpan
       const prevLeg = legend.find((h) => h.ruleId === rule.id);
@@ -2849,11 +4173,12 @@ const App = (() => {
     // 圖例依句中出現順序（有 span 的優先），其餘依 API 順序；補充用法最後
     const firstPos = new Map();
     for (const s of spans) {
+      if (s.missing || s.color === "missing" || s.color === "usage") continue;
       const prev = firstPos.get(s.ruleId);
       if (prev == null || s.start < prev) firstPos.set(s.ruleId, s.start);
     }
     for (const h of legend) {
-      if (h.supplementary) continue;
+      if (h.supplementary || !h.owned) continue;
       if (!h.hasSpan && firstPos.has(h.ruleId)) h.hasSpan = true;
     }
     ownedHits.forEach((h) => {
@@ -2863,15 +4188,19 @@ const App = (() => {
       if (Boolean(a.supplementary) !== Boolean(b.supplementary)) {
         return a.supplementary ? 1 : -1;
       }
+      const aOwned = Boolean(a.owned);
+      const bOwned = Boolean(b.owned);
+      if (aOwned !== bOwned) return aOwned ? -1 : 1;
       if (Boolean(a.hasSpan) !== Boolean(b.hasSpan)) return a.hasSpan ? -1 : 1;
-      const pa = firstPos.has(a.ruleId) ? firstPos.get(a.ruleId) : 1e9;
-      const pb = firstPos.has(b.ruleId) ? firstPos.get(b.ruleId) : 1e9;
+      const pa = a.ruleId && firstPos.has(a.ruleId) ? firstPos.get(a.ruleId) : 1e9;
+      const pb = b.ruleId && firstPos.has(b.ruleId) ? firstPos.get(b.ruleId) : 1e9;
       if (pa !== pb) return pa - pb;
       return a.invIdx - b.invIdx;
     });
     const recolor = new Map();
     let ci = 0;
     for (const h of legend) {
+      if (!h.owned || !h.ruleId) continue;
       if (h.supplementary || h.color === "usage") {
         h.color = "usage";
         continue;
@@ -2883,6 +4212,7 @@ const App = (() => {
       h.color = recolor.get(h.ruleId);
     }
     for (const s of spans) {
+      if (s.missing || s.color === "missing" || s.color === "usage") continue;
       if (recolor.has(s.ruleId)) s.color = recolor.get(s.ruleId);
     }
     ownedHits.forEach((h) => {
@@ -2906,7 +4236,21 @@ const App = (() => {
       h.order = i + 1;
     });
 
-    return { spans, legend, colorByRule: recolor, ownedHits, missingItems };
+    return {
+      spans,
+      legend,
+      colorByRule: recolor,
+      ownedHits,
+      missingItems,
+      audit: {
+        total: ownedPointCount + missingItems.length,
+        owned: ownedPointCount,
+        missing: missingItems.length,
+        rejected: rejectedCount,
+        unresolved: unresolvedCount,
+        repairUsed: Boolean(inventory?.apiRepairUsed),
+      },
+    };
   }
 
   /**
@@ -2925,7 +4269,12 @@ const App = (() => {
     if (!sl) return false;
     const surf = normVocabKey(w.surface);
     const lem = normVocabKey(w.lemma);
-    return (surf && sl === surf) || (lem && sl === lem);
+    if ((surf && sl === surf) || (lem && sl === lem)) return true;
+    const alts =
+      typeof Storage.pronounAlts === "function"
+        ? [...Storage.pronounAlts(surf), ...Storage.pronounAlts(lem)]
+        : [];
+    return alts.includes(sl);
   }
 
   /**
@@ -3033,7 +4382,16 @@ const App = (() => {
       }
 
       if (!placed) {
-        for (const n of [w.surface, w.lemma].filter(Boolean).sort((a, b) => b.length - a.length)) {
+        const needles = [w.surface, w.lemma].filter(Boolean);
+        if (typeof Storage.pronounAlts === "function") {
+          for (const n of [w.surface, w.lemma].filter(Boolean)) {
+            Storage.pronounAlts(n).forEach((a) => {
+              if (!needles.includes(a)) needles.push(a);
+            });
+          }
+        }
+        needles.sort((a, b) => b.length - a.length);
+        for (const n of needles) {
           if (n.length < 1) continue;
           const loc = findInSrc(n);
           if (loc) {
@@ -3053,6 +4411,45 @@ const App = (() => {
     return hits;
   }
 
+  /** 把對上的 start/end 寫回 vocab，避免下次打開只剩錯的 a/b 或空座標 */
+  function writeBackVocabLocations(query, vocabList) {
+    const list = Array.isArray(vocabList) ? vocabList.slice() : [];
+    if (!list.length) return list;
+    const locs = locateVocabInText(query, list);
+    const used = new Set();
+    for (const loc of locs) {
+      let idx = list.findIndex((w, i) => {
+        if (used.has(i)) return false;
+        const a = Number(w.start);
+        const b = Number(w.end);
+        if (Number.isFinite(a) && Number.isFinite(b) && a === loc.start && b === loc.end) {
+          return true;
+        }
+        return false;
+      });
+      if (idx < 0) {
+        idx = list.findIndex((w, i) => {
+          if (used.has(i)) return false;
+          const surf = String(w.surface || "").trim();
+          const lem = String(w.lemma || "").trim();
+          return surf === loc.surface || lem === loc.lemma || surf === loc.lemma || lem === loc.surface;
+        });
+      }
+      if (idx < 0) continue;
+      used.add(idx);
+      list[idx] = {
+        ...list[idx],
+        start: loc.start,
+        end: loc.end,
+        surface: loc.surface || list[idx].surface,
+        lemma: loc.lemma || list[idx].lemma,
+        gloss: loc.gloss || list[idx].gloss,
+        pos: loc.pos || list[idx].pos,
+      };
+    }
+    return list;
+  }
+
   /** 文法 mark 開標籤 HTML */
   function grammarMarkOpenHtml(s) {
     const tipOf = (h) =>
@@ -3060,7 +4457,7 @@ const App = (() => {
         ? `${h.ruleTitle} · ${h.fusionNote}`
         : h.needle
           ? `${h.ruleTitle} ← ${h.needle}`
-          : h.ruleTitle || "";
+          : h.ruleTitle || h.apiName || "";
     const stack = [
       {
         color: s.color,
@@ -3068,26 +4465,143 @@ const App = (() => {
         ruleTitle: s.ruleTitle,
         needle: s.needle,
         fusionNote: s.fusionNote,
+        missing: s.missing,
       },
       ...(s.coHits || []),
-    ];
-    const multi = stack.length > 1;
+    ].filter((h) => h && h.color !== "usage");
+    const owned = stack.filter(
+      (h) => !h.missing && h.color !== "missing" && Number.isFinite(Number(h.color))
+    );
+    const use = owned.length ? owned : stack;
+    const first = use[0] || s;
+    const multi = use.length > 1 && use.every((h) => Number.isFinite(Number(h.color)));
     const tip = multi
-      ? stack.map((h, i) => `${i + 1}. ${tipOf(h)}`).join(" ｜ ") + "（顏色輪播）"
-      : tipOf(stack[0]);
-    const colorsAttr = multi ? ` data-cycle-colors="${stack.map((h) => h.color).join(",")}"` : "";
+      ? use.map((h, i) => `${i + 1}. ${tipOf(h)}`).join(" ｜ ") + "（顏色輪播）"
+      : first.missing || first.color === "missing"
+        ? `尚未建立：${tipOf(first)}`
+        : tipOf(first);
+    const cls =
+      first.missing || first.color === "missing"
+        ? "gram-hl gram-hl-missing"
+        : `gram-hl gram-hl-${first.color ?? 0}${multi ? " gram-hl-cycle" : ""}`;
+    const colorsAttr = multi ? ` data-cycle-colors="${use.map((h) => h.color).join(",")}"` : "";
     const titlesAttr = multi
-      ? ` data-cycle-titles="${esc(stack.map((h) => tipOf(h)).join("\n"))}"`
+      ? ` data-cycle-titles="${esc(use.map((h) => tipOf(h)).join("\n"))}"`
       : "";
-    const multiClass = multi ? " gram-hl-cycle" : "";
-    const ruleIdsAttr = multi
-      ? ` data-cycle-rule-ids="${stack.map((h) => h.ruleId || "").join(",")}"`
-      : s.ruleId
-        ? ` data-scroll-rule="${esc(s.ruleId)}"`
+    const scrollAttr =
+      !first.missing && first.color !== "missing" && first.ruleId
+        ? ` data-scroll-rule="${esc(first.ruleId)}" data-rule-id="${esc(first.ruleId)}"`
         : "";
-    return `<mark class="gram-hl gram-hl-${stack[0].color}${multiClass}" title="${esc(
-      tip
-    )}"${colorsAttr}${titlesAttr}${ruleIdsAttr}>`;
+    const cycleIds = multi
+      ? ` data-cycle-rule-ids="${use.map((h) => h.ruleId || "").join(",")}"`
+      : "";
+    return `<mark class="${cls}" title="${esc(tip)}"${colorsAttr}${titlesAttr}${scrollAttr}${cycleIds}>`;
+  }
+
+  /** 單字庫詞性 → 底線色類（動詞淺藍／名詞淺綠／形容詞黃／副詞紅／其他紫） */
+  function posUnderlineKind(pos) {
+    const p = String(pos || "");
+    if (/助動詞|助詞|語尾/.test(p)) return "other";
+    if (/形容詞|形容動詞|adjective|\badj\b/i.test(p)) return "adj";
+    if (/副詞|adverb/i.test(p)) return "adv";
+    if (/動詞|verb/i.test(p)) return "verb";
+    if (/名詞|noun/i.test(p)) return "noun";
+    return "other";
+  }
+
+  const POS_UL_KINDS = ["verb", "noun", "adj", "adv", "other"];
+  const POS_UL_LABELS = {
+    verb: "動詞",
+    noun: "名詞",
+    adj: "形容詞",
+    adv: "副詞",
+    other: "其他",
+  };
+  const POS_UL_STORAGE_KEY = "kgn_pos_underline_hidden";
+
+  function loadPosUnderlineHidden() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(POS_UL_STORAGE_KEY) || "{}");
+      const out = {};
+      for (const k of POS_UL_KINDS) out[k] = Boolean(raw?.[k]);
+      return out;
+    } catch {
+      return { verb: false, noun: false, adj: false, adv: false, other: false };
+    }
+  }
+
+  function posHideToken(hidden) {
+    return POS_UL_KINDS.filter((k) => hidden[k]).join(" ");
+  }
+
+  function sentenceBoardPosHideAttr() {
+    const v = posHideToken(loadPosUnderlineHidden());
+    return v ? ` data-pos-hide="${esc(v)}"` : "";
+  }
+
+  function applyPosUnderlineVisibility() {
+    const hidden = loadPosUnderlineHidden();
+    const board = $("#sentence-board");
+    if (board) {
+      const v = posHideToken(hidden);
+      if (v) board.setAttribute("data-pos-hide", v);
+      else board.removeAttribute("data-pos-hide");
+    }
+    const allOn = POS_UL_KINDS.every((k) => !hidden[k]);
+    const allOff = POS_UL_KINDS.every((k) => hidden[k]);
+    document.querySelectorAll("[data-pos-toggle]").forEach((btn) => {
+      const k = btn.dataset.posToggle;
+      if (k === "all") {
+        btn.classList.toggle("is-off", allOff);
+        btn.classList.toggle("is-mixed", !allOn && !allOff);
+        btn.setAttribute("aria-pressed", allOn ? "true" : "false");
+        btn.title = allOn ? "關閉全部底線" : "開啟全部底線";
+        return;
+      }
+      const on = !hidden[k];
+      btn.classList.toggle("is-off", !on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      const label = POS_UL_LABELS[k] || "";
+      btn.title = `${on ? "隱藏" : "顯示"}${label}底線`;
+    });
+  }
+
+  function togglePosUnderline(kind) {
+    const hidden = loadPosUnderlineHidden();
+    if (kind === "all") {
+      const allOn = POS_UL_KINDS.every((k) => !hidden[k]);
+      const next = {};
+      for (const k of POS_UL_KINDS) next[k] = allOn;
+      localStorage.setItem(POS_UL_STORAGE_KEY, JSON.stringify(next));
+      applyPosUnderlineVisibility();
+      return;
+    }
+    if (!POS_UL_KINDS.includes(kind)) return;
+    hidden[kind] = !hidden[kind];
+    localStorage.setItem(POS_UL_STORAGE_KEY, JSON.stringify(hidden));
+    applyPosUnderlineVisibility();
+  }
+
+  function posUnderlineLegendHtml() {
+    const hidden = loadPosUnderlineHidden();
+    const allOn = POS_UL_KINDS.every((k) => !hidden[k]);
+    const allOff = POS_UL_KINDS.every((k) => hidden[k]);
+    const allBtn = `<button type="button" class="pos-line-toggle pos-line-toggle-all${
+      allOff ? " is-off" : ""
+    }${!allOn && !allOff ? " is-mixed" : ""}" data-pos-toggle="all" aria-pressed="${
+      allOn ? "true" : "false"
+    }" title="${allOn ? "關閉全部底線" : "開啟全部底線"}">全部</button>`;
+    const items = POS_UL_KINDS.map((k) => {
+      const on = !hidden[k];
+      return `<button type="button" class="pos-line-toggle${
+        on ? "" : " is-off"
+      }" data-pos-toggle="${k}" aria-pressed="${on ? "true" : "false"}" title="${
+        on ? "隱藏" : "顯示"
+      }${POS_UL_LABELS[k]}底線"><span class="pos-line" data-pos-kind="${k}">${
+        POS_UL_LABELS[k]
+      }</span></button>`;
+    }).join("");
+    return `<span class="pos-line-legend" role="group" aria-label="詞性底線，點擊顯示或隱藏">${allBtn}${items}</span>`;
   }
 
   function wordTipOpenHtml(v) {
@@ -3095,14 +4609,15 @@ const App = (() => {
       v.lemma ? `原形 ${v.lemma}` : "",
       v.gloss ? `意思 ${v.gloss}` : "",
       v.pos ? `（${v.pos}）` : "",
+      v.lemma ? "點擊複製並朗讀原形" : "",
     ]
       .filter(Boolean)
       .join(" · ");
     return `<span class="word-tip" tabindex="0" data-lemma="${esc(v.lemma)}" data-gloss="${esc(
       v.gloss
-    )}" data-pos="${esc(v.pos)}" data-surface="${esc(v.surface)}" title="${esc(
-      fallbackTitle
-    )}">`;
+    )}" data-pos="${esc(v.pos)}" data-pos-kind="${esc(posUnderlineKind(v.pos))}" data-surface="${esc(
+      v.surface
+    )}" data-tag="${esc(v.tag || "")}" title="${esc(fallbackTitle)}">`;
   }
 
   /**
@@ -3182,18 +4697,25 @@ const App = (() => {
     const isApi = options.source === "api";
     const apiLegend = options.apiLegend || null;
     const vocabList = options.vocab || [];
+    const audit = options.audit || null;
 
     const colorOf = (s) => {
-      if (s.color != null && s.color !== "" && s.color !== "missing") return s.color;
+      if (s.missing || s.color === "missing") return "missing";
+      if (s.color != null && s.color !== "") return s.color;
       if (colorByRule && s.ruleId && colorByRule.has(s.ruleId)) return colorByRule.get(s.ruleId);
       return 0;
     };
 
-    // 較長優先；重疊的其他規則併入 coHits，之後顏色輪播
-    const sorted = (spans || [])
-      .filter((s) => !s.missing && s.color !== "missing")
-      .slice()
-      .sort((a, b) => a.start - b.start || b.end - a.end - (a.end - a.start));
+    // 較長優先；已收錄先於未收錄；重疊的其他規則併入 coHits
+    const sorted = (spans || []).slice().sort((a, b) => {
+      const lenA = (a.end || 0) - (a.start || 0);
+      const lenB = (b.end || 0) - (b.start || 0);
+      if (lenB !== lenA) return lenB - lenA;
+      if (a.start !== b.start) return a.start - b.start;
+      const am = a.missing || a.color === "missing" ? 1 : 0;
+      const bm = b.missing || b.color === "missing" ? 1 : 0;
+      return am - bm;
+    });
     const used = [];
     for (const s of sorted) {
       if (s.start >= query.length || s.end > query.length || s.start >= s.end) continue;
@@ -3204,6 +4726,8 @@ const App = (() => {
         ruleTitle: s.ruleTitle || "",
         needle: s.needle || "",
         fusionNote: s.fusionNote || "",
+        missing: Boolean(s.missing || s.color === "missing"),
+        invIdx: s.invIdx,
       };
       const host = used.find((u) => !(s.end <= u.start || s.start >= u.end));
       if (host) {
@@ -3225,29 +4749,49 @@ const App = (() => {
     }
     used.sort((a, b) => a.start - b.start);
 
-    const vocabLocs = locateVocabInText(query, vocabList);
+    const tokens = Array.isArray(options.tokens) ? options.tokens : [];
+    // 句子上的單字 hover 以 API／單字庫的完整詞彙區間為準，才能保留 gloss。
+    // Kiwi 的語素區間可能把活用詞拆成詞幹、語尾，語尾本身沒有意思；
+    // 只有 API 單字無法對回原文時，才退回語素 hover。
+    const locatedVocab = locateVocabInText(query, vocabList);
+    const vocabLocs =
+      locatedVocab.length || !tokens.length || typeof KoParse === "undefined" || !KoParse.hoverLocs
+        ? locatedVocab
+        : KoParse.hoverLocs(tokens, vocabList);
     const html =
       used.length || vocabLocs.length
         ? buildAnnotatedSentenceHtml(query, used, vocabLocs)
         : esc(query);
 
-    // 圖例：僅已收錄且會句中上色的；補充用法改用右側 +補充
+    // 圖例：已收錄色點 + 未收錄紅標；補充用法改用右側 +補充
     let legend = "";
-    const legendOwned = (apiLegend || []).filter(
-      (h) => h.owned && !h.supplementary && h.color !== "usage"
+    const legendItems = (apiLegend || []).filter(
+      (h) => !h.supplementary && h.color !== "usage"
     );
-    if (legendOwned.length) {
-      legend = legendOwned
-        .map(
-          (h) => `
+    if (legendItems.length) {
+      legend = legendItems
+        .map((h) => {
+          const sw =
+            h.color === "missing" || !h.owned
+              ? "gram-hl gram-hl-missing"
+              : `gram-hl gram-hl-${h.color}`;
+          const badge = h.owned
+            ? ""
+            : `<span class="badge badge-missing-hl">未建立</span>`;
+          const btn = h.owned
+            ? `<button type="button" class="legend-link" data-scroll-rule="${esc(h.ruleId)}">${esc(
+                h.ruleTitle || h.name
+              )}</button>`
+            : `<button type="button" class="legend-link legend-link-missing" data-create-inv-idx="${h.invIdx}">${esc(
+                h.name
+              )}</button>`;
+          return `
         <li class="legend-item">
-          <span class="legend-swatch gram-hl gram-hl-${h.color}"></span>
-          <button type="button" class="legend-link" data-scroll-rule="${esc(h.ruleId)}">${esc(
-            h.ruleTitle || h.name
-          )}</button>
-          ${!h.hasSpan ? `<span class="legend-count">（句中未定位）</span>` : ""}
-        </li>`
-        )
+          <span class="legend-swatch ${sw}"></span>${btn}${badge}${
+            h.owned && !h.hasSpan ? `<span class="legend-count">（句中未定位）</span>` : ""
+          }
+        </li>`;
+        })
         .join("");
     } else if (orderedHits && orderedHits.length) {
       legend = orderedHits
@@ -3295,24 +4839,47 @@ const App = (() => {
     const hasVocab = vocabLocs.length > 0;
     const emptyGrammarNote =
       isApi && !used.length
-        ? `<p class="panel-note" style="margin:0.5rem 0 0">尚無已收錄規則可在句中標記（未收錄的文法見下方列表）。${
+        ? `<p class="panel-note" style="margin:0.5rem 0 0">尚無可在句中標記的文法（未收錄見下方列表）。${
             hasVocab ? "滑過底線詞可看原形與意思。" : ""
           } 也可按 +補充。</p>`
         : "";
     const editHint = isApi
       ? `<p class="sentence-edit-hint">選取文字或<strong>點已上色片段</strong>可套用／疊加規則；下方規則卡操作列的<strong>手動定位</strong>可指定句中片段。右側<strong>+補充</strong>可加入不句中上色的補充用法。</p>`
       : `<p class="sentence-edit-hint">右側<strong>+補充</strong>可加入不句中上色的補充用法。</p>`;
+    const modeLabel = options.fallbackLegacy
+      ? "API 標記 · 已回退舊盤點"
+      : options.mappingFailed
+        ? "形態素切詞 · 對卡未完成"
+        : audit?.repairUsed
+          ? "API 標記 · 補查完成"
+        : tokens.length
+          ? "API 標記 · 形態素切詞"
+          : isApi
+            ? "API 標記"
+            : "查詢內容";
+    const auditLabel =
+      isApi && audit
+        ? `<span class="sentence-cycle-hint">文法 ${Number(audit.total) || 0} · 已收錄 ${
+            Number(audit.owned) || 0
+          } · 未收錄 ${Number(audit.missing) || 0}${
+            Number(audit.rejected) > 0 ? ` · 排除候選 ${Number(audit.rejected)}` : ""
+          }${
+            Number(audit.unresolved) > 0 ? ` · 待確認 ${Number(audit.unresolved)}` : ""
+          }</span>`
+        : "";
 
     // 句子 + 色點圖例同框 sticky（父層 lookup-result-stack 須夠高）
     return `
-      <div class="sentence-board" id="sentence-board">
+      <div class="sentence-board" id="sentence-board"${sentenceBoardPosHideAttr()}>
         <div id="locate-mode-bar" class="locate-mode-bar hidden" role="status"></div>
         <p class="sentence-label">
-          <span class="sentence-label-main">查詢內容</span>
+          <span class="sentence-label-main">${esc(modeLabel)}</span>
+          ${auditLabel}
           ${hasCycle ? `<span class="sentence-cycle-hint">共置輪播</span>` : ""}
-          ${hasVocab ? `<span class="sentence-cycle-hint">滑過看原形</span>` : ""}
+          ${hasVocab ? `<span class="sentence-cycle-hint">滑過看原形／語素</span>` : ""}
+          ${hasVocab ? posUnderlineLegendHtml() : ""}
         </p>
-        <p class="sentence-text" id="sentence-text">${html || esc(query)}</p>
+        ${sentenceTextBlockHtml(html || esc(query))}
         ${editHint}
         ${emptyGrammarNote || ""}
         <ul class="sentence-legend" aria-label="句中規則與補充">
@@ -3321,10 +4888,148 @@ const App = (() => {
             <button type="button" class="btn-legend-add" data-add-supplementary title="加入補充用法（不句中上色）">+補充</button>
           </li>
         </ul>
+        ${options.inventory ? sentenceTranslationHtml(options.inventory) : ""}
       </div>`;
   }
 
+  /**
+   * Mirinae 式層列：語節 → 語素 → 角色／句層。
+   * 不放進 sticky 句框，避免把句子區撐滿。
+   */
+  function morphBoardHtml(query, inventory) {
+    const tokens = Array.isArray(inventory?.tokens) ? inventory.tokens : [];
+    if (!tokens.length || typeof KoParse === "undefined" || !KoParse.analysisModel) return "";
+    const model = KoParse.analysisModel(query, tokens, inventory?.vocab, inventory?.items);
+    const words = model.words || [];
+    if (!words.length) return "";
+    const nMorph = words.reduce((n, w) => n + (w.morphs || []).length, 0);
+    const chips = words
+      .map((w) => {
+        const morphs = (w.morphs || [])
+          .map((m) => {
+            const affix = m.zeroWidth || m.pos === "助詞" || m.pos === "語尾";
+            const tip = [m.form, m.pos, m.tag, m.lemma && m.lemma !== m.form ? `原 ${m.lemma}` : "", m.grammarName, m.gloss]
+              .filter(Boolean)
+              .join(" · ");
+            return `<span class="morph-chip${affix ? " is-affix" : " is-content"}" data-pos="${esc(
+              m.pos || ""
+            )}" title="${esc(tip)}"><span class="morph-chip-form">${esc(
+              m.form
+            )}</span><span class="morph-chip-role">${esc(m.roleLabel || m.pos || "")}</span></span>`;
+          })
+          .join("");
+        const phrase = w.phrase && w.phrase.role
+          ? `<span class="morph-phrase" data-kind="${esc(w.phrase.kind || "")}">${esc(w.phrase.role)}</span>`
+          : `<span class="morph-phrase morph-phrase-empty">—</span>`;
+        const gloss = w.gloss
+          ? `<span class="morph-gloss">${esc(w.gloss)}</span>`
+          : `<span class="morph-gloss morph-gloss-empty"></span>`;
+        return `<div class="morph-eojeol">
+          ${phrase}
+          <div class="morph-surface">${esc(w.text)}</div>
+          <div class="morph-forms">${morphs}</div>
+          ${gloss}
+        </div>`;
+      })
+      .join("");
+    return `
+      <details class="morph-board" id="morph-board" open>
+        <summary class="morph-board-summary" title="展開或收合形態素分析">
+          形態素分析
+          <span class="morph-board-meta">${words.length} 語節 · ${nMorph} 語素</span>
+        </summary>
+        <p class="morph-board-hint">上層是語節（空白分開的詞），中層是語素（詞幹／助詞／語尾；받침裡的 ㄴ·ㄹ·ㅆ 也拆開），底層是句層角色。</p>
+        <div class="morph-eojeol-row">${chips}</div>
+      </details>`;
+  }
+
   /** 原形 tooltip 浮層 */
+  let wordTipHideTimer = 0;
+  let wordTipSelectArmed = false;
+  let wordTipAnchor = null;
+  let sentenceGesture = { moved: false, x: 0, y: 0 };
+  let suppressWordTipClick = false;
+
+  function cancelWordTipHide() {
+    if (wordTipHideTimer) {
+      clearTimeout(wordTipHideTimer);
+      wordTipHideTimer = 0;
+    }
+  }
+
+  function wordTipPointerOver() {
+    const pop = document.getElementById("word-tip-pop");
+    if (pop && !pop.classList.contains("hidden") && pop.matches(":hover")) return true;
+    return Boolean(document.querySelector(".word-tip:hover"));
+  }
+
+  function wordTipHasSelection() {
+    const pop = document.getElementById("word-tip-pop");
+    if (!pop || pop.classList.contains("hidden")) return false;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    try {
+      return sel.getRangeAt(0).intersectsNode(pop);
+    } catch {
+      return pop.contains(sel.anchorNode) || pop.contains(sel.focusNode);
+    }
+  }
+
+  function wordTipShouldStay() {
+    return wordTipPointerOver() || wordTipHasSelection();
+  }
+
+  function onWordTipSelectMouseUp() {
+    wordTipSelectArmed = false;
+    document.removeEventListener("mouseup", onWordTipSelectMouseUp);
+    if (!wordTipShouldStay()) hideWordTipPop();
+  }
+
+  /** 框選文字拖出解釋欄時不要立刻關；放開後若已離開再關 */
+  function requestHideWordTipPop(e) {
+    if (e && e.buttons) {
+      if (!wordTipSelectArmed) {
+        wordTipSelectArmed = true;
+        document.addEventListener("mouseup", onWordTipSelectMouseUp);
+      }
+      return;
+    }
+    cancelWordTipHide();
+    wordTipHideTimer = window.setTimeout(() => {
+      wordTipHideTimer = 0;
+      if (!wordTipShouldStay()) hideWordTipPop();
+    }, 180);
+  }
+
+  function bindWordTipOutsideDismiss() {
+    if (bindWordTipOutsideDismiss.done) return;
+    bindWordTipOutsideDismiss.done = true;
+    document.addEventListener("pointerdown", (e) => {
+      const pop = document.getElementById("word-tip-pop");
+      if (!pop || pop.classList.contains("hidden")) return;
+      if (pop.contains(e.target)) return;
+      if (e.target.closest && e.target.closest(".word-tip")) return;
+      hideWordTipPop();
+    });
+  }
+
+  function appendWordTipCopyAction(pop, data) {
+    if (!pop || !isCoarsePointer()) return;
+    const lemma = String(data?.lemma || "").trim();
+    if (!lemma) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-sm word-tip-copy-btn";
+    btn.textContent = "複製並朗讀";
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const speak = String(data.reading || data.surface || lemma).trim() || lemma;
+      copyLemmaToClipboard(lemma, { speak });
+    });
+    pop.appendChild(btn);
+  }
+
   function ensureWordTipPop() {
     let el = document.getElementById("word-tip-pop");
     if (el) return el;
@@ -3332,11 +5037,24 @@ const App = (() => {
     el.id = "word-tip-pop";
     el.className = "word-tip-pop hidden";
     el.setAttribute("role", "tooltip");
+    el.addEventListener("mouseenter", () => {
+      if (!isCoarsePointer()) cancelWordTipHide();
+    });
+    el.addEventListener("mouseleave", (e) => {
+      if (!isCoarsePointer()) requestHideWordTipPop(e);
+    });
     document.body.appendChild(el);
+    bindWordTipOutsideDismiss();
     return el;
   }
 
   function hideWordTipPop() {
+    cancelWordTipHide();
+    wordTipAnchor = null;
+    if (wordTipSelectArmed) {
+      wordTipSelectArmed = false;
+      document.removeEventListener("mouseup", onWordTipSelectMouseUp);
+    }
     const el = document.getElementById("word-tip-pop");
     if (el) {
       el.classList.add("hidden");
@@ -3345,11 +5063,14 @@ const App = (() => {
   }
 
   function showWordTipPop(anchor, data) {
+    if (isSentenceSelectEdit()) return;
+    cancelWordTipHide();
     const pop = ensureWordTipPop();
     const lemma = data.lemma || "";
     const gloss = data.gloss || "";
     const pos = data.pos || "";
     const surface = data.surface || "";
+    const tag = data.tag || "";
     pop.innerHTML = `
       <div class="word-tip-row word-tip-surface">${esc(surface || "—")}</div>
       <div class="word-tip-row"><span class="word-tip-k">原形</span><span class="word-tip-v">${esc(
@@ -3362,24 +5083,517 @@ const App = (() => {
         pos
           ? `<div class="word-tip-row"><span class="word-tip-k">詞性</span><span class="word-tip-v">${esc(
               pos
-            )}</span></div>`
-          : ""
+            )}${tag ? ` · ${esc(tag)}` : ""}</span></div>`
+          : tag
+            ? `<div class="word-tip-row"><span class="word-tip-k">標籤</span><span class="word-tip-v">${esc(
+                tag
+              )}</span></div>`
+            : ""
       }`;
+    pop.innerHTML = wrapWordTipPopHtml(pop.innerHTML);
+    finalizeWordTipPop(pop, anchor, data);
+  }
+
+  const LOOKUP_TTS_LANG = "ko-KR";
+  const TTS_API_LANG = "ko";
+  let ttsVoices = [];
+  let ttsAudio = null;
+  let ttsToken = 0;
+  const ttsCache = new Map();
+  const TTS_CACHE_MAX = 40;
+  let apiTtsWarned = false;
+
+  function refreshTtsVoices() {
+    if (!window.speechSynthesis) return;
+    ttsVoices = speechSynthesis.getVoices() || [];
+  }
+
+  function pickTtsVoice(lang) {
+    if (!window.speechSynthesis) return null;
+    const want = String(lang || LOOKUP_TTS_LANG).toLowerCase().replace(/_/g, "-");
+    const prefix = want.slice(0, 2);
+    const list = ttsVoices.length ? ttsVoices : speechSynthesis.getVoices() || [];
+    return (
+      list.find((v) => String(v.lang || "").toLowerCase().replace(/_/g, "-") === want) ||
+      list.find((v) => String(v.lang || "").toLowerCase().startsWith(prefix)) ||
+      null
+    );
+  }
+
+  function stopLookupSpeech() {
+    try {
+      window.speechSynthesis?.cancel();
+    } catch {
+      /* ignore */
+    }
+    if (ttsAudio) {
+      try {
+        ttsAudio.pause();
+      } catch {
+        /* ignore */
+      }
+      ttsAudio = null;
+    }
+  }
+
+  function speakViaBrowser(text, lang = LOOKUP_TTS_LANG) {
+    if (!window.speechSynthesis) return;
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = lang;
+      u.rate = 0.92;
+      const voice = pickTtsVoice(lang);
+      if (voice) u.voice = voice;
+      speechSynthesis.speak(u);
+    } catch (err) {
+      console.warn("[tts]", err);
+    }
+  }
+
+  function normalizeTtsBaseUrl(url) {
+    let base = String(url || "").trim().replace(/\/+$/, "");
+    if (/^https?:\/\/api\.x\.ai$/i.test(base)) base = "https://api.x.ai/v1";
+    return base;
+  }
+
+  function pcmToWavBlob(pcmBytes, sampleRate = 24000) {
+    const pcm = pcmBytes instanceof Uint8Array ? pcmBytes : new Uint8Array(pcmBytes);
+    const header = new ArrayBuffer(44);
+    const v = new DataView(header);
+    const str = (o, s) => {
+      for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i));
+    };
+    str(0, "RIFF");
+    v.setUint32(4, 36 + pcm.length, true);
+    str(8, "WAVE");
+    str(12, "fmt ");
+    v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true);
+    v.setUint32(24, sampleRate, true);
+    v.setUint32(28, sampleRate * 2, true);
+    v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true);
+    str(36, "data");
+    v.setUint32(40, pcm.length, true);
+    const out = new Uint8Array(44 + pcm.length);
+    out.set(new Uint8Array(header), 0);
+    out.set(pcm, 44);
+    return new Blob([out], { type: "audio/wav" });
+  }
+
+  function grokTtsCandidate(s, profiles) {
+    const grokProv =
+      typeof Storage.getApiProvider === "function" ? Storage.getApiProvider("grok") : null;
+    const grok = profiles.grok && typeof profiles.grok === "object" ? profiles.grok : {};
+    const pid = String(s.apiProvider || "").trim();
+    let apiKey = String(grok.apiKey || "").trim();
+    let baseUrl = normalizeTtsBaseUrl(grok.baseUrl || grokProv?.baseUrl || "https://api.x.ai/v1");
+    if (pid === "grok" || /x\.ai/i.test(String(s.baseUrl || ""))) {
+      if (!apiKey) apiKey = String(s.apiKey || "").trim();
+      if (s.baseUrl) baseUrl = normalizeTtsBaseUrl(s.baseUrl);
+    }
+    if (!apiKey) return null;
+    return { kind: "grok", id: "grok", label: "Grok", apiKey, baseUrl };
+  }
+
+  function googleTtsCandidate(s, profiles) {
+    const pid = String(s.apiProvider || "").trim();
+    const google = profiles.google && typeof profiles.google === "object" ? profiles.google : {};
+    const apiKey = String(
+      google.apiKey || (pid === "google" || /generativelanguage\.googleapis/.test(String(s.baseUrl || ""))
+        ? s.apiKey
+        : "")
+    ).trim();
+    if (!apiKey) return null;
+    return { kind: "google", id: "google", label: "Google", apiKey };
+  }
+
+  function customTtsCandidate(s, profiles) {
+    const pid = String(s.apiProvider || "").trim();
+    const custom = profiles.custom && typeof profiles.custom === "object" ? profiles.custom : {};
+    const apiKey = String(pid === "custom" ? s.apiKey || custom.apiKey : custom.apiKey || "").trim();
+    const baseUrl = normalizeTtsBaseUrl(pid === "custom" ? s.baseUrl || custom.baseUrl : custom.baseUrl);
+    if (!apiKey || !baseUrl) return null;
+    return { kind: "openai", id: "custom", label: "自訂", apiKey, baseUrl };
+  }
+
+  function currentTtsCandidate(s, profiles) {
+    const pid = String(s.apiProvider || "").trim();
+    const url = String(s.baseUrl || "").toLowerCase();
+    if (pid === "google" || /generativelanguage\.googleapis/.test(url)) return googleTtsCandidate(s, profiles);
+    if (pid === "deepseek" || /deepseek\.com/.test(url)) return null;
+    if (pid === "custom") return customTtsCandidate(s, profiles);
+    return grokTtsCandidate(s, profiles);
+  }
+
+  function resolveTtsProvider() {
+    const s = Storage.loadSettings();
+    const profiles = s.apiProfiles && typeof s.apiProfiles === "object" ? s.apiProfiles : {};
+    const current = currentTtsCandidate(s, profiles);
+    if (current && current.apiKey) return { ...current, fallback: false };
+    const alts = [
+      grokTtsCandidate(s, profiles),
+      googleTtsCandidate(s, profiles),
+      customTtsCandidate(s, profiles),
+    ].filter((p) => p && p.apiKey && (!current || p.id !== current.id));
+    if (alts[0]) return { ...alts[0], fallback: true };
+    if (current) return { ...current, fallback: false };
+    return { kind: "none", id: String(s.apiProvider || ""), label: "目前服務", apiKey: "" };
+  }
+
+  function putTtsCache(key, url) {
+    if (ttsCache.has(key)) {
+      const old = ttsCache.get(key);
+      if (old && old !== url) URL.revokeObjectURL(old);
+      ttsCache.delete(key);
+    }
+    ttsCache.set(key, url);
+    while (ttsCache.size > TTS_CACHE_MAX) {
+      const first = ttsCache.keys().next().value;
+      const u = ttsCache.get(first);
+      if (u) URL.revokeObjectURL(u);
+      ttsCache.delete(first);
+    }
+  }
+
+  async function fetchGrokTts(p, text) {
+    const res = await fetch(`${p.baseUrl}/tts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${p.apiKey}`,
+      },
+      body: JSON.stringify({
+        text,
+        voice_id: "eve",
+        language: TTS_API_LANG,
+        output_format: { codec: "mp3", sample_rate: 24000, bit_rate: 128000 },
+      }),
+    });
+    if (!res.ok) {
+      const detail = String(await res.text().catch(() => "")).slice(0, 180);
+      throw new Error(`Grok TTS HTTP ${res.status}${detail ? `：${detail}` : ""}`);
+    }
+    const buf = await res.arrayBuffer();
+    if (!buf || buf.byteLength < 32) throw new Error("TTS 回傳空白音訊");
+    return URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+  }
+
+  async function fetchGoogleTts(p, text) {
+    const models = ["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"];
+    let lastErr = null;
+    for (const model of models) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+        p.apiKey
+      )}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              languageCode: LOOKUP_TTS_LANG,
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+            },
+          },
+        }),
+      });
+      if (res.status === 404) {
+        lastErr = new Error(`找不到 Gemini TTS 模型 ${model}`);
+        continue;
+      }
+      if (!res.ok) {
+        const detail = String(await res.text().catch(() => "")).slice(0, 180);
+        throw new Error(`Google TTS HTTP ${res.status}${detail ? `：${detail}` : ""}`);
+      }
+      const json = await res.json();
+      const part = json?.candidates?.[0]?.content?.parts?.find((x) => x?.inlineData?.data);
+      const b64 = part?.inlineData?.data;
+      if (!b64) throw new Error("Google TTS 未回傳音訊");
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const mime = String(part.inlineData.mimeType || "");
+      const rateMatch = mime.match(/rate=(\d+)/i);
+      const rate = rateMatch ? Number(rateMatch[1]) : 24000;
+      if (/mpeg|mp3/i.test(mime)) {
+        return URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+      }
+      return URL.createObjectURL(pcmToWavBlob(bytes, rate || 24000));
+    }
+    throw lastErr || new Error("Google TTS 失敗");
+  }
+
+  async function fetchOpenAiTts(p, text) {
+    if (!p.baseUrl) throw new Error("自訂端點未填 Base URL");
+    const res = await fetch(`${p.baseUrl}/audio/speech`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${p.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "tts-1",
+        input: text,
+        voice: "alloy",
+        response_format: "mp3",
+      }),
+    });
+    if (!res.ok) {
+      const detail = String(await res.text().catch(() => "")).slice(0, 180);
+      throw new Error(`自訂 TTS HTTP ${res.status}${detail ? `：${detail}` : ""}`);
+    }
+    const buf = await res.arrayBuffer();
+    if (!buf || buf.byteLength < 32) throw new Error("TTS 回傳空白音訊");
+    return URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+  }
+
+  async function speakViaApi(text) {
+    const p = resolveTtsProvider();
+    if (p.kind === "none" || !p.apiKey) throw new Error(p.kind === "none" ? "NO_TTS_PROVIDER" : "NO_TTS_KEY");
+    if (p.fallback && !apiTtsWarned) {
+      apiTtsWarned = true;
+      showToast(`目前服務沒有語音，改用 ${p.label}`, "info");
+    }
+    const cacheKey = `${p.kind}|${text}|${LOOKUP_TTS_LANG}`;
+    let objectUrl = ttsCache.get(cacheKey);
+    const myToken = ++ttsToken;
+    if (!objectUrl) {
+      if (p.kind === "google") objectUrl = await fetchGoogleTts(p, text);
+      else if (p.kind === "openai") objectUrl = await fetchOpenAiTts(p, text);
+      else objectUrl = await fetchGrokTts(p, text);
+      putTtsCache(cacheKey, objectUrl);
+    }
+    if (myToken !== ttsToken) return;
+    stopLookupSpeech();
+    const audio = new Audio(objectUrl);
+    ttsAudio = audio;
+    await audio.play();
+  }
+
+  function speakLookupText(text, lang = LOOKUP_TTS_LANG) {
+    const t = String(text || "").trim();
+    if (!t) return;
+    const useApi = Boolean(Storage.loadSettings().apiTtsEnabled);
+    if (!useApi) {
+      stopLookupSpeech();
+      speakViaBrowser(t, lang);
+      return;
+    }
+    speakViaApi(t).catch((err) => {
+      console.warn("[tts-api]", err);
+      const code = err && err.message;
+      if (!apiTtsWarned && (code === "NO_TTS_KEY" || code === "NO_TTS_PROVIDER")) {
+        apiTtsWarned = true;
+        showToast("沒有可用的語音 API Key（Grok／Google／自訂），已改用系統語音", "warn");
+      } else if (code !== "NO_TTS_KEY" && code !== "NO_TTS_PROVIDER") {
+        showToast("API 語音失敗，改用系統語音", "warn");
+      }
+      speakViaBrowser(t, lang);
+    });
+  }
+
+  function syncApiTtsSwitch(settings) {
+    const el = $("#settings-api-tts");
+    if (el) el.checked = Boolean((settings || Storage.loadSettings()).apiTtsEnabled);
+  }
+
+  function onApiTtsToggle() {
+    const on = Boolean($("#settings-api-tts")?.checked);
+    Storage.saveSettings({ apiTtsEnabled: on });
+    apiTtsWarned = false;
+    if (!on) {
+      showToast("朗讀改用系統語音", "info");
+      return;
+    }
+    const p = resolveTtsProvider();
+    if (p.kind === "none" || !p.apiKey) {
+      showToast("沒有可用的語音 API Key（Grok／Google／自訂），朗讀仍用系統語音", "warn");
+    } else if (p.fallback) {
+      showToast(`目前服務沒有語音，改用 ${p.label} 朗讀`, "info");
+    } else {
+      showToast(`朗讀改用 ${p.label} API 語音`, "info");
+    }
+  }
+
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    refreshTtsVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", refreshTtsVoices);
+  }
+
+  function isSentenceSelectEdit() {
+    return Boolean(state.sentenceSelectEdit);
+  }
+
+  function syncSentenceSelectEditUi() {
+    const on = isSentenceSelectEdit();
+    $("#sentence-board")?.classList.toggle("is-select-edit", on);
+    document.querySelectorAll("[data-sentence-select-edit]").forEach((btn) => {
+      btn.classList.toggle("is-on", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+
+  function setSentenceSelectEdit(on) {
+    const next = Boolean(on);
+    const changed = next !== isSentenceSelectEdit();
+    state.sentenceSelectEdit = next;
+    hideWordTipPop();
+    syncSentenceSelectEditUi();
+    if (!changed) return;
+    if (next) {
+      showToast("選字編輯：點句中的字來套用規則或編輯單字", "info");
+    } else {
+      showToast("已關閉選字編輯，點字可再看詞義", "info");
+    }
+  }
+
+  function toggleSentenceSelectEdit() {
+    setSentenceSelectEdit(!isSentenceSelectEdit());
+  }
+
+  function wrapWordTipPopHtml(bodyHtml) {
+    const on = isSentenceSelectEdit();
+    return `<div class="word-tip-pop-inner">
+      <div class="word-tip-pop-body">${bodyHtml}</div>
+      <button type="button" class="word-tip-edit-mode-btn${on ? " is-on" : ""}" data-sentence-select-edit aria-pressed="${
+        on ? "true" : "false"
+      }" title="開啟選字編輯：改以點擊選字，套用規則或編輯單字">選字編輯</button>
+    </div>`;
+  }
+
+  function finalizeWordTipPop(pop, anchor, data) {
     pop.classList.remove("hidden");
-    const rect = anchor.getBoundingClientRect();
-    const pad = 8;
-    let top = rect.bottom + pad + window.scrollY;
-    let left = rect.left + window.scrollX;
-    // 先顯示再量寬
-    const pr = pop.getBoundingClientRect();
-    if (left + pr.width > window.scrollX + window.innerWidth - 12) {
-      left = Math.max(12, window.scrollX + window.innerWidth - pr.width - 12);
+    wordTipAnchor = anchor;
+    const body = pop.querySelector(".word-tip-pop-body") || pop;
+    appendWordTipCopyAction(body, data);
+    requestAnimationFrame(() => placePopNearAnchor(pop, anchor));
+  }
+
+  function applySentenceTokenSelection(el, clientX, clientY) {
+    if (!el) return false;
+    const range = getMarkRangeInQuery(el);
+    if (!range?.text) return false;
+    hideWordTipPop();
+    state.selApply = range;
+    try {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch {
+      /* ignore */
     }
-    if (rect.bottom + pr.height + pad > window.innerHeight && rect.top > pr.height + pad) {
-      top = rect.top + window.scrollY - pr.height - pad;
+    const inv = state.lastInventory;
+    let note = "點選片段 · 可套用規則或編輯單字";
+    if (inv?.items && range.start >= 0) {
+      const n = inv.items.filter((it) => {
+        if (Number.isFinite(Number(it.start)) && Number.isFinite(Number(it.end))) {
+          return !(range.end <= Number(it.start) || range.start >= Number(it.end));
+        }
+        return String(it.span || "").trim() === range.text;
+      }).length;
+      if (n > 0) note = `此片段已有 ${n} 則 · 可再疊加`;
     }
-    pop.style.top = `${top}px`;
-    pop.style.left = `${left}px`;
+    showSelApplyPop(clientX, clientY, range.text, { note });
+    return true;
+  }
+
+  function markSentenceGestureStart(e) {
+    const p = eventClientPoint(e);
+    sentenceGesture = { moved: false, x: p.x, y: p.y };
+  }
+
+  function markSentenceGestureMove(e) {
+    const p = eventClientPoint(e);
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+    if (!Number.isFinite(sentenceGesture.x)) return;
+    if (Math.hypot(p.x - sentenceGesture.x, p.y - sentenceGesture.y) > 12) {
+      sentenceGesture.moved = true;
+    }
+  }
+
+  function shouldRevealSelApplyFromGesture() {
+    return sentenceGesture.moved;
+  }
+
+  function sentenceSelectEditButtonHtml() {
+    const on = isSentenceSelectEdit();
+    return `<button type="button" class="btn-sentence-select-edit${on ? " is-on" : ""}" data-sentence-select-edit title="選字編輯：點擊句中的字來套用規則或編輯單字" aria-label="選字編輯" aria-pressed="${
+      on ? "true" : "false"
+    }">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+      </svg>
+    </button>`;
+  }
+
+  function sentenceSpeakButtonHtml() {
+    return `<button type="button" class="btn-sentence-speak" data-speak-sentence title="朗讀整句" aria-label="朗讀整句">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path fill="currentColor" d="M3 10v4h4l5 5V5L7 10H3zm13.5 2A4.5 4.5 0 0 0 14 8.04v7.93A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+      </svg>
+    </button>`;
+  }
+
+  function sentenceTextBlockHtml(innerHtml) {
+    return `<div class="sentence-text-row">
+      <p class="sentence-text" id="sentence-text">${innerHtml}</p>
+      <div class="sentence-text-actions">
+        ${sentenceSelectEditButtonHtml()}
+        ${sentenceSpeakButtonHtml()}
+      </div>
+    </div>`;
+  }
+
+  function speakCurrentSentence() {
+    const t = String(state.lastQuery || $("#sentence-text")?.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!t) {
+      showToast("沒有可朗讀的句子", "info");
+      return;
+    }
+    speakLookupText(t);
+  }
+
+  function fallbackCopyText(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;left:-9999px;top:0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  function copyLemmaToClipboard(lemma, opts = {}) {
+    const t = String(lemma || "").trim();
+    if (!t) return;
+    const spoken = String(opts.speak || t).trim() || t;
+    speakLookupText(spoken, opts.lang || LOOKUP_TTS_LANG);
+    const ok = () => showToast(`已複製原形「${t}」並朗讀`, "success");
+    const fail = () => showToast("無法複製到剪貼簿", "error");
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(t).then(ok).catch(() => {
+        if (fallbackCopyText(t)) ok();
+        else fail();
+      });
+      return;
+    }
+    if (fallbackCopyText(t)) ok();
+    else fail();
   }
 
   function bindWordTipHovers(root = document) {
@@ -3390,11 +5604,54 @@ const App = (() => {
         gloss: el.dataset.gloss || "",
         pos: el.dataset.pos || "",
         surface: el.dataset.surface || el.textContent || "",
+        tag: el.dataset.tag || "",
       };
-      el.addEventListener("mouseenter", () => showWordTipPop(el, data));
-      el.addEventListener("mouseleave", () => hideWordTipPop());
-      el.addEventListener("focus", () => showWordTipPop(el, data));
-      el.addEventListener("blur", () => hideWordTipPop());
+      let pressX = 0;
+      let pressY = 0;
+      const coarse = isCoarsePointer();
+      if (!coarse) {
+        el.addEventListener("mouseenter", () => {
+          if (isSentenceSelectEdit()) return;
+          showWordTipPop(el, data);
+        });
+        el.addEventListener("mouseleave", (e) => requestHideWordTipPop(e));
+        el.addEventListener("focus", () => {
+          if (isSentenceSelectEdit()) return;
+          showWordTipPop(el, data);
+        });
+        el.addEventListener("blur", () => requestHideWordTipPop());
+      }
+      el.addEventListener("pointerdown", (e) => {
+        pressX = e.clientX;
+        pressY = e.clientY;
+      });
+      el.addEventListener("click", (e) => {
+        if (e.detail > 1) return;
+        if (state.locateTarget) return;
+        if (suppressWordTipClick) {
+          suppressWordTipClick = false;
+          return;
+        }
+        if (sentenceGesture.moved) return;
+        if (selectionIsNonEmptyInSentence() && !isSentenceSelectEdit()) return;
+        if (Math.hypot(e.clientX - pressX, e.clientY - pressY) > 8) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (isSentenceSelectEdit()) {
+          applySentenceTokenSelection(el, e.clientX, e.clientY);
+          return;
+        }
+        if (coarse) {
+          if (wordTipAnchor === el) hideWordTipPop();
+          else showWordTipPop(el, data);
+          return;
+        }
+        const lemma = String(el.dataset.lemma || "").trim();
+        if (!lemma) return;
+        const speak =
+          String(el.dataset.surface || data.surface || "").trim() || lemma;
+        copyLemmaToClipboard(lemma, { speak });
+      });
     });
   }
 
@@ -3535,7 +5792,7 @@ const App = (() => {
     const v = String($("#inv-translation-input")?.value || "").trim();
     state.lastInventory.translation = v;
     if (typeof refreshLookupFromInventory === "function") {
-      refreshLookupFromInventory();
+      refreshLookupFromInventory({ replaceTranslation: true });
     } else {
       const block = $("#inv-translation-block");
       if (block) {
@@ -3543,7 +5800,7 @@ const App = (() => {
         bindTranslationEditors(document);
       }
       if (typeof persistCurrentInventory === "function") {
-        persistCurrentInventory({ silent: true });
+        persistCurrentInventory({ silent: true, replaceTranslation: true });
       }
     }
     showToast(v ? "已更新翻譯" : "已清除翻譯", "success");
@@ -3560,7 +5817,6 @@ const App = (() => {
   function missingInventoryHtml(inventory, missingItems) {
     if (!inventory) return "";
     const list = missingItems || [];
-    const sentenceTr = sentenceTranslationHtml(inventory);
     const summary = inventory.summary
       ? `<p class="panel-note">${esc(inventory.summary)}</p>`
       : "";
@@ -3569,13 +5825,12 @@ const App = (() => {
     if (!list.length) {
       const hasVocab = Array.isArray(inventory.vocab) && inventory.vocab.length;
       if (hasVocab && !isLocal) {
-        if (!sentenceTr && !summary) return "";
+        if (!summary) return "";
         return `
         <section class="panel panel-suggest" id="api-inventory-slot">
           <div class="panel-head">
-            <h3>翻譯</h3>
+            <h3>摘要</h3>
           </div>
-          ${sentenceTr}
           ${summary}
         </section>`;
       }
@@ -3587,7 +5842,6 @@ const App = (() => {
               isLocal ? "本地掃描" : "全部已有筆記"
             }</span>
           </div>
-          ${sentenceTr}
           ${summary}
           <p class="panel-note">${
             isLocal
@@ -3597,27 +5851,26 @@ const App = (() => {
         </section>`;
     }
 
-    const rows = list
+    const cards = list
       .map(({ it, invIdx }) => {
+        const draft = it.draft && typeof it.draft === "object" ? it.draft : {};
+        const fakeRule = {
+          id: `generated-${invIdx}`,
+          title: draft.title || it.name || "未命名規則",
+          category: draft.category || it.category || "",
+          explanation: draft.explanation || "",
+          structure: draft.structure || "",
+        };
         const conf =
-          it.confidence === "low" ? " · 需確認" : it.confidence === "high" ? "" : "";
-        return `
-          <li class="inventory-item missing" data-inv-idx="${invIdx}">
-            <div class="inventory-meta">
-              <strong>${esc(it.name)}</strong>
-              <span class="inv-note">
-                <span class="badge badge-missing">尚未收錄</span>
-                ${it.category ? ` · ${esc(it.category)}` : ""}
-                ${it.span ? ` · <code>${esc(it.span)}</code>` : ""}
-                ${conf}
-              </span>
-            </div>
-            <div class="action-row">
-              <button type="button" class="btn btn-sm btn-primary" data-add-todo-idx="${invIdx}">加入待辦</button>
-              <button type="button" class="btn btn-sm btn-secondary" data-create-inv-idx="${invIdx}">建立規則</button>
-              <button type="button" class="btn btn-sm btn-ghost" data-dismiss-inv-idx="${invIdx}" title="從本句結果移除（不刪筆記本）">本句忽略</button>
-            </div>
-          </li>`;
+          it.confidence === "low" ? "需確認" : it.confidence === "high" ? "" : "";
+        const spanNote = it.span ? `句中：「${it.span}」` : "句中未定位";
+        const extra = `<p class="muted" style="font-size:0.85rem;margin-top:0.25rem">${esc(
+          [spanNote, conf].filter(Boolean).join(" · ")
+        )} · 僅本句顯示，尚未寫入筆記本</p>`;
+        return `<div class="inventory-item missing-card" data-inv-idx="${invIdx}">${ruleCardHtml(
+          fakeRule,
+          { mode: "generated", generatedIdx: invIdx, extra }
+        )}</div>`;
       })
       .join("");
 
@@ -3627,12 +5880,12 @@ const App = (() => {
           <h3>尚未收錄</h3>
           <span class="badge badge-api-fallback">${list.length} 項</span>
         </div>
-        ${sentenceTr}
         ${summary}
+        <p class="panel-note">API 盤點到、筆記本還沒有的文法。可直接收入或加入待辦；<strong>不會自動寫入</strong>筆記本。</p>
         <div class="action-row" style="margin-bottom:0.65rem">
           <button type="button" class="btn btn-primary" id="btn-add-all-missing">將 ${list.length} 項全部加入待辦</button>
         </div>
-        <ul class="inventory-list">${rows}</ul>
+        <div class="match-list inventory-generated-list">${cards}</div>
       </section>`;
   }
 
@@ -3733,20 +5986,26 @@ const App = (() => {
     const inv = state.lastInventory;
     if (!q || !inv) return null;
     // 可傳入已算過的 apiHl，避免手動校正後再全量重算
+    keepExistingTranslation(q, inv, opts);
+    if (typeof writeBackVocabLocations === "function") {
+      inv.vocab = writeBackVocabLocations(q, inv.vocab);
+    }
     const apiHl = opts.apiHl || buildApiHighlight(q, inv);
     const payload = {
       query: q,
       summary: inv.summary || "",
       translation: inv.translation || "",
+      replaceTranslation: Boolean(opts.replaceTranslation),
       ownedCount: (apiHl.ownedHits || []).length,
       missingCount: (apiHl.missingItems || []).length,
       items: inv.items || [],
       vocab: inv.vocab || [],
+      tokens: inv.tokens || [],
     };
+    applyPersistEntryTarget(payload, opts);
     const activePid = Storage.getActiveProjectId();
     if (activePid) {
-      Storage.upsertProjectEntry(activePid, payload);
-      const after = Storage.findProjectEntryByQuery(activePid, q);
+      const after = Storage.upsertProjectEntry(activePid, payload);
       if (after?.seq != null) state.projectCursorSeq = after.seq;
       updateProjectModeUI();
     } else if (!opts.skipHistory) {
@@ -3761,7 +6020,10 @@ const App = (() => {
     const inv = state.lastInventory;
     if (!q || !inv) return;
     const apiHl = applyInventoryToLookup(q, inv, opts);
-    persistCurrentInventory({ apiHl: apiHl || undefined });
+    persistCurrentInventory({
+      apiHl: apiHl || undefined,
+      replaceTranslation: Boolean(opts.replaceTranslation),
+    });
   }
 
   /** 從本句結果移除某規則的套用（筆記本規則保留） */
@@ -3775,6 +6037,7 @@ const App = (() => {
     const before = (inv.items || []).length;
     inv.items = (inv.items || []).filter((it) => {
       if (it.manualRuleId && String(it.manualRuleId) === id) return false;
+      if (it.localRuleId && String(it.localRuleId) === id) return false;
       const m = resolveInventoryRule(it);
       if (m.owned && m.rule?.id === id) return false;
       return true;
@@ -3786,6 +6049,43 @@ const App = (() => {
     state.lastInventory = inv;
     refreshLookupFromInventory();
     showToast("已從本句移除（筆記本規則仍保留）", "success");
+  }
+
+  /** 把本句生成卡寫入筆記本並套回此項 */
+  function saveGeneratedDraftToNotebook(invIdx) {
+    const inv = ensureLookupInventoryShell();
+    if (!inv) {
+      showToast("請先完成一次查詢", "info");
+      return;
+    }
+    const i = Number(invIdx);
+    const it = Array.isArray(inv.items) ? inv.items[i] : null;
+    if (!it) {
+      showToast("找不到這項文法", "error");
+      return;
+    }
+    const owned = resolveInventoryRule(it);
+    if (owned.owned && owned.rule) {
+      showToast(`筆記本已有「${owned.rule.title}」`, "info");
+      return;
+    }
+    const draft = it.draft && typeof it.draft === "object" ? it.draft : {};
+    const title = String(draft.title || it.name || "").trim();
+    if (!title) {
+      showToast("沒有規則名，請改用「編輯後建立」", "error");
+      return;
+    }
+    const rule = RulesService.create({
+      title,
+      category: draft.category || it.category || "其他",
+      explanation: draft.explanation || "",
+      structure: draft.structure || "",
+    });
+    attachCreatedRuleToInventoryItem(rule, captureInventoryPendingFromItem(it, i));
+    updateRuleCount();
+    renderRulesList();
+    refreshLookupFromInventory();
+    showToast(`已收入筆記本：${rule.title}`, "success");
   }
 
   /** 忽略尚未收錄的某一項（僅本句） */
@@ -3895,6 +6195,134 @@ const App = (() => {
     renderRulePickList();
   }
 
+  function captureInventoryPendingFromItem(it, invIdx) {
+    if (!it) return null;
+    const start = Number(it.start);
+    const end = Number(it.end);
+    const tokenFrom = Number(it.tokenFrom);
+    const tokenTo = Number(it.tokenTo);
+    return {
+      invIdx: Number.isFinite(Number(invIdx)) ? Number(invIdx) : -1,
+      name: String(it.name || it.title || "").trim(),
+      span: String(it.span || "").trim(),
+      category: String(it.category || "").trim(),
+      kiwiKind: String(it.kiwiKind || "").trim(),
+      start: Number.isFinite(start) ? start : undefined,
+      end: Number.isFinite(end) ? end : undefined,
+      tokenFrom: Number.isFinite(tokenFrom) ? tokenFrom : undefined,
+      tokenTo: Number.isFinite(tokenTo) ? tokenTo : undefined,
+    };
+  }
+
+  function captureInventoryPendingByTitle(title) {
+    const want = String(title || "").trim();
+    const items = state.lastInventory?.items;
+    if (!want || !Array.isArray(items)) return null;
+    const idx = items.findIndex((it) => {
+      if (!it) return false;
+      if (resolveInventoryRule(it).owned) return false;
+      return String(it.name || it.title || "").trim() === want;
+    });
+    if (idx < 0) return null;
+    return captureInventoryPendingFromItem(items[idx], idx);
+  }
+
+  /** 從尚未收錄建立的規則：直接綁回該盤點項，避免嚴格對卡失敗看起來像沒存到 */
+  function attachCreatedRuleToInventoryItem(rule, pending) {
+    if (!rule?.id) return false;
+    const inv = ensureLookupInventoryShell();
+    if (!inv) return false;
+    const items = Array.isArray(inv.items) ? inv.items.slice() : [];
+    const pendingName = String(pending?.name || "").trim();
+    const pendingSpan = String(pending?.span || "").trim();
+    const sameItem = (it) => {
+      if (!it) return false;
+      const name = String(it.name || it.title || "").trim();
+      if (pendingName && name === pendingName) return true;
+      if (pendingSpan && String(it.span || "").trim() === pendingSpan && name === pendingName) {
+        return true;
+      }
+      return false;
+    };
+    let idx = Number(pending?.invIdx);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= items.length || !sameItem(items[idx])) {
+      idx = items.findIndex(sameItem);
+    }
+    const parsed = RulesService.parseBilingualTitle(rule.title) || {};
+    const patch = {
+      name: rule.title,
+      nameZh: parsed.zh || "",
+      nameKo: parsed.ko || "",
+      category: rule.category || (idx >= 0 ? items[idx]?.category : "") || pending?.category || "",
+      confidence: "high",
+      source: "manual",
+      manualRuleId: rule.id,
+    };
+    if (idx >= 0) {
+      const prev = items[idx] || {};
+      const next = { ...prev, ...patch };
+      if (prev.span || pendingSpan) next.span = prev.span || pendingSpan;
+      const start = Number.isFinite(Number(prev.start)) ? Number(prev.start) : Number(pending?.start);
+      const end = Number.isFinite(Number(prev.end)) ? Number(prev.end) : Number(pending?.end);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        next.start = start;
+        next.end = end;
+      }
+      if (prev.tokenFrom != null || pending?.tokenFrom != null) {
+        next.tokenFrom = prev.tokenFrom ?? pending.tokenFrom;
+      }
+      if (prev.tokenTo != null || pending?.tokenTo != null) {
+        next.tokenTo = prev.tokenTo ?? pending.tokenTo;
+      }
+      items[idx] = next;
+    } else {
+      const row = { ...patch, span: pendingSpan };
+      const start = Number(pending?.start);
+      const end = Number(pending?.end);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        row.start = start;
+        row.end = end;
+      }
+      if (pending?.tokenFrom != null) row.tokenFrom = pending.tokenFrom;
+      if (pending?.tokenTo != null) row.tokenTo = pending.tokenTo;
+      if (pending?.kiwiKind) row.kiwiKind = pending.kiwiKind;
+      items.push(row);
+    }
+    inv.items = items;
+    state.lastInventory = inv;
+    return true;
+  }
+
+  function countVisibleItemsOnRange(inv, q, start, end, spanText) {
+    const list = inv?.items || [];
+    const tokens = inv?.tokens;
+    const src = String(q || "");
+    const span = String(spanText || "").trim();
+    let n = 0;
+    for (const it of list) {
+      let found = [];
+      try {
+        found = locateInventoryItemInText(src, it, tokens) || [];
+      } catch {
+        found = [];
+      }
+      if (found.length) {
+        if (found.some((loc) => !(end <= loc.start || start >= loc.end))) n += 1;
+        continue;
+      }
+      if (it.source === "manual" || it.locatedManually) {
+        const a = Number(it.start);
+        const b = Number(it.end);
+        if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+          if (!(end <= a || start >= b)) n += 1;
+        } else if (span && String(it.span || "").trim() === span) {
+          n += 1;
+        }
+      }
+    }
+    return n;
+  }
+
   /** 手動把筆記本規則套到選取片段 */
   function addRuleToCurrentResult(rule, spanText, start, end) {
     if (!rule?.id) return;
@@ -3930,39 +6358,34 @@ const App = (() => {
     function rangesOverlap(a0, a1, b0, b1) {
       return !(a1 <= b0 || a0 >= b1);
     }
-    /** 同規則已佔用區間：有座標用座標；無座標則各佔下一個尚未佔用的 span 出現處 */
+    /**
+     * 只計算句中實際看得到的套用（有上色／手動）。
+     * API 誤報被閘門丟掉的項目仍留在 items 裡，不可再擋使用者套用。
+     */
     function collectSameRuleOccupied() {
       const occupied = [];
-      const unlocated = [];
       for (const it of inv.items || []) {
         if (!itemMatchesRule(it)) continue;
-        const a = Number(it.start);
-        const b = Number(it.end);
-        if (
-          Number.isFinite(a) &&
-          Number.isFinite(b) &&
-          b > a &&
-          a >= 0 &&
-          b <= q.length
-        ) {
-          occupied.push({ s: a, e: b });
-        } else {
-          unlocated.push(it);
+        let found = [];
+        try {
+          found = locateInventoryItemInText(q, it, inv.tokens) || [];
+        } catch {
+          found = [];
         }
-      }
-      for (const it of unlocated) {
-        const sp = String(it.span || "").trim();
-        if (!sp) continue;
-        let from = 0;
-        while (from < q.length) {
-          const idx = q.indexOf(sp, from);
-          if (idx < 0) break;
-          const pe = idx + sp.length;
-          if (!occupied.some((r) => rangesOverlap(idx, pe, r.s, r.e))) {
-            occupied.push({ s: idx, e: pe });
-            break;
+        if (found.length) {
+          for (const loc of found) {
+            if (Number.isFinite(loc.start) && Number.isFinite(loc.end) && loc.end > loc.start) {
+              occupied.push({ s: loc.start, e: loc.end });
+            }
           }
-          from = idx + 1;
+          continue;
+        }
+        if (it.source === "manual" || it.locatedManually) {
+          const a = Number(it.start);
+          const b = Number(it.end);
+          if (Number.isFinite(a) && Number.isFinite(b) && b > a && a >= 0 && b <= q.length) {
+            occupied.push({ s: a, e: b });
+          }
         }
       }
       return occupied;
@@ -4015,6 +6438,14 @@ const App = (() => {
       }
       return String(it.span || "").trim() === span;
     }).length;
+
+    // 清掉同規則、句中看不到的幽靈項目，避免再擋下一次套用
+    inv.items = (inv.items || []).filter((it) => {
+      if (!itemMatchesRule(it)) return true;
+      if (it.source === "manual" || it.locatedManually) return true;
+      const found = locateInventoryItemInText(q, it, inv.tokens);
+      return found.length > 0;
+    });
 
     const parsed = RulesService.parseBilingualTitle(rule.title) || {};
     const item = {
@@ -4263,19 +6694,21 @@ const App = (() => {
       }
     }
     pop.classList.remove("hidden");
-    // 先顯示再量尺寸
     requestAnimationFrame(() => {
-      const pad = 8;
-      const rect = pop.getBoundingClientRect();
-      let left = clientX - rect.width / 2;
-      let top = clientY + 12;
-      left = Math.max(pad, Math.min(left, window.innerWidth - rect.width - pad));
-      if (top + rect.height > window.innerHeight - pad) {
-        top = clientY - rect.height - 12;
+      let x = clientX;
+      let y = clientY;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        try {
+          const r = window.getSelection()?.getRangeAt(0)?.getBoundingClientRect();
+          x = r.left + r.width / 2;
+          y = r.bottom;
+        } catch {
+          const vv = visualViewportBox();
+          x = vv.left + vv.width / 2;
+          y = vv.top + 96;
+        }
       }
-      top = Math.max(pad, top);
-      pop.style.left = `${left}px`;
-      pop.style.top = `${top}px`;
+      placeFixedPop(pop, x, y);
     });
   }
 
@@ -4761,30 +7194,32 @@ const App = (() => {
     const host = board || sentenceEl;
     if (!host || host.dataset.selBound === "1") return;
     host.dataset.selBound = "1";
+    host.addEventListener("pointerdown", markSentenceGestureStart);
+    host.addEventListener("pointermove", markSentenceGestureMove);
     host.addEventListener("mouseup", onSentenceMouseUp);
+    host.addEventListener("touchend", onSentenceMouseUp, { passive: true });
   }
 
   function onSentenceMouseUp(e) {
     if (e.target.closest && e.target.closest("#sel-apply-pop, button, a, .sentence-legend, .locate-mode-bar")) {
       return;
     }
+    if (!shouldRevealSelApplyFromGesture()) return;
+    suppressWordTipClick = true;
+    const point = eventClientPoint(e);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const cap = captureSentenceSelection();
         if (!cap) return;
         state.selApply = cap;
         const inv = state.lastInventory;
+        const q = String(state.lastQuery || "");
         let note = "";
-        if (inv?.items && cap.start >= 0) {
-          const n = inv.items.filter((it) => {
-            if (Number.isFinite(Number(it.start)) && Number.isFinite(Number(it.end))) {
-              return !(cap.end <= Number(it.start) || cap.start >= Number(it.end));
-            }
-            return String(it.span || "").trim() === cap.text;
-          }).length;
+        if (inv?.items && cap.start >= 0 && q) {
+          const n = countVisibleItemsOnRange(inv, q, cap.start, cap.end, cap.text);
           if (n > 0) note = `此片段已有 ${n} 則 · 可再疊加`;
         }
-        showSelApplyPop(e.clientX, e.clientY, cap.text, { note });
+        showSelApplyPop(point.x, point.y, cap.text, { note });
       });
     });
   }
@@ -4821,12 +7256,7 @@ const App = (() => {
     const inv = state.lastInventory;
     let n = 0;
     if (inv?.items && range.start >= 0) {
-      n = inv.items.filter((it) => {
-        if (Number.isFinite(Number(it.start)) && Number.isFinite(Number(it.end))) {
-          return !(range.end <= Number(it.start) || range.start >= Number(it.end));
-        }
-        return String(it.span || "").trim() === range.text;
-      }).length;
+      n = countVisibleItemsOnRange(inv, String(state.lastQuery || ""), range.start, range.end, range.text);
     }
     showSelApplyPop(e.clientX, e.clientY, range.text, {
       note: n > 0 ? `已有 ${n} 則規則 · 可再疊加其他規則` : "可為此片段套用規則",
@@ -4938,6 +7368,7 @@ const App = (() => {
 
     // 依選取片段本地智慧排序（有 Kiwi 時帶入語素提示）
     let kiwiHints = [];
+    let kiwiAnalyzed = false;
     if (
       selText &&
       typeof KiwiService !== "undefined" &&
@@ -4953,6 +7384,7 @@ const App = (() => {
             cap?.start,
             cap?.end
           );
+          kiwiAnalyzed = true;
         } catch (err) {
           console.warn("[kiwi] span hints failed", err);
         }
@@ -4977,6 +7409,10 @@ const App = (() => {
         minScore: 8,
         maxSuggest: 8,
         kiwiHints,
+        kiwiAnalyzed,
+        contextText: state.lastQuery,
+        spanStart: state.selApply?.start,
+        spanEnd: state.selApply?.end,
       });
       suggestions = ranked.suggestions || [];
       rest = ranked.rest || rest;
@@ -4988,6 +7424,10 @@ const App = (() => {
           minScore: 6,
           maxSuggest: 12,
           kiwiHints,
+          kiwiAnalyzed,
+          contextText: state.lastQuery,
+          spanStart: state.selApply?.start,
+          spanEnd: state.selApply?.end,
         });
         const matchQ = (r) => {
           const blob = `${r.title || ""} ${r.category || ""} ${r.explanation || ""}`.toLowerCase();
@@ -5193,14 +7633,30 @@ const App = (() => {
       });
     });
 
+    root.querySelectorAll("[data-save-draft-idx]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        saveGeneratedDraftToNotebook(btn.dataset.saveDraftIdx);
+      });
+    });
+
     root.querySelectorAll("[data-create-inv-idx]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const it = inventory?.items?.[Number(btn.dataset.createInvIdx)];
+        const idx = Number(btn.dataset.createInvIdx);
+        const it = inventory?.items?.[idx];
         if (!it) return;
-        // 新規則只帶名稱，不預填說明／分類／結構（之後用 AI 自動填寫或手寫）
+        state.pendingSelApply = null;
+        state.pendingSupplementaryApply = false;
+        state.pendingCreateFromInventory = captureInventoryPendingFromItem(it, idx);
+        const draft = it.draft && typeof it.draft === "object" ? it.draft : {};
         openForm(null, {
-          title: it.name,
-          banner: `<strong>由 API 盤點建立</strong> — ${esc(it.name)}`,
+          title: draft.title || it.name,
+          category: draft.category || it.category || "",
+          explanation: draft.explanation || "",
+          structure: draft.structure || "",
+          fromInventory: true,
+          banner: `<strong>由 API 盤點建立</strong> — ${esc(
+            draft.title || it.name
+          )}。儲存後會直接套用到本句，不必再對一次卡名。`,
         });
       });
     });
@@ -5216,143 +7672,50 @@ const App = (() => {
     bindTranslationEditors(root);
   }
 
-  /**
-   * 本地掃描 → 與 API 相同的 inventory 形狀（可手動校正／寫入歷史／專案）
-   */
-  function buildLocalInventory(query) {
-    const src = String(query || "");
-    const items = [];
-    const covered = new Set();
-
-    const spans =
-      typeof RulesService.scanSentence === "function" ? RulesService.scanSentence(src) : [];
-
-    for (const s of spans) {
-      const rule = RulesService.getById(s.ruleId);
-      if (!rule) continue;
-      covered.add(rule.id);
-      const parsed = RulesService.parseBilingualTitle(rule.title) || {};
-      items.push({
-        name: rule.title,
-        nameKo: parsed.ko || "",
-        nameZh: parsed.zh || "",
-        span: s.text || src.slice(s.start, s.end),
-        start: s.start,
-        end: s.end,
-        category: rule.category || "",
-        confidence: "medium",
-        source: "local",
-        manualRuleId: rule.id,
-      });
-    }
-
-    // 補上 searchLocal 高分命中但句中未定位者（顯示規則卡、可能「句中未定位」）
-    const searchHits =
-      typeof RulesService.searchLocal === "function" ? RulesService.searchLocal(src) : [];
-    for (const h of searchHits) {
-      const rule = h.rule;
-      if (!rule?.id || covered.has(rule.id)) continue;
-      if ((h.score || 0) < 10) continue;
-      covered.add(rule.id);
-      const parsed = RulesService.parseBilingualTitle(rule.title) || {};
-      items.push({
-        name: rule.title,
-        nameKo: parsed.ko || "",
-        nameZh: parsed.zh || "",
-        span: (h.matchedNeedles && h.matchedNeedles[0]) || "",
-        category: rule.category || "",
-        confidence: "low",
-        source: "local",
-        manualRuleId: rule.id,
-      });
-    }
-
-    const ruleCount = covered.size;
-    const markCount = items.filter((it) => Number.isFinite(it.start)).length;
-    return {
-      mode: "local",
-      source: "local",
-      summary: `本地掃描：${ruleCount} 條規則 · ${markCount} 處句中標記`,
-      translation: "",
-      items,
-      vocab: [],
-    };
-  }
-
   async function fetchLookupInventory(query) {
     const form = String(query || "").trim();
     const modes = Storage.loadLookupModes();
-    const anyMode = modes.apiGrammar || modes.localGrammar || modes.apiVocab;
+    const anyMode = modes.apiGrammar || modes.apiVocab;
     if (!anyMode) {
-      return {
+      const inventory = {
         summary: "手動模式",
         translation: "",
         items: [],
         vocab: [],
         mode: "manual",
         source: "manual",
+        grammarEnabled: false,
       };
+      keepExistingTranslation(form, inventory);
+      return inventory;
     }
     const needApi = modes.apiGrammar || modes.apiVocab;
-    if (modes.localGrammar && !needApi) {
-      return buildLocalInventory(form);
-    }
     if (needApi && !Storage.hasApiKey()) {
-      const err = new Error("此模式需要 API Key，請先到「設定」填入（或改開本地文法排查）");
+      const err = new Error("此模式需要 API Key，請先到「設定」填入");
       err.code = "NEED_API_KEY";
       throw err;
     }
 
     const wantApiVocab = Boolean(modes.apiVocab);
     const wantApiGrammar = Boolean(modes.apiGrammar);
-    const skipVocabApi =
-      wantApiVocab &&
-      typeof Storage.estimateVocabBankCoverage === "function" &&
-      (() => {
-        const cov = Storage.estimateVocabBankCoverage(form, []);
-        return cov.total >= 2 && cov.ratio >= 0.85 && cov.hit >= 2;
-      })();
     let inventory;
 
-    if (modes.localGrammar) {
-      inventory = buildLocalInventory(form);
-      if (wantApiVocab && !skipVocabApi) {
-        const apiInv =
-          typeof AiService.inventoryVocabOnly === "function"
-            ? await AiService.inventoryVocabOnly(form)
-            : await AiService.inventoryGrammar(form, []);
-        inventory.vocab = Array.isArray(apiInv.vocab) ? apiInv.vocab : [];
-        if (apiInv.translation) inventory.translation = apiInv.translation;
-        inventory.summary = `${inventory.summary || ""} · API 單字 ${inventory.vocab.length}`.trim();
-      } else if (wantApiVocab && skipVocabApi) {
-        inventory.vocab = [];
-        inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API）`.trim();
-      }
-    } else if (wantApiGrammar) {
-      const titles = RulesService.getAll().map((r) => r.title);
-      inventory = await AiService.inventoryGrammar(form, titles);
+    if (wantApiGrammar) {
+      const vocabP = wantApiVocab ? requestApiVocab(form) : null;
+      inventory = await fetchApiGrammarInventory(form, false);
       inventory.mode = "api";
       inventory.source = "api";
-      if (!wantApiVocab || skipVocabApi) {
-        inventory.vocab = [];
-        if (skipVocabApi) {
-          inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API 單字）`.trim();
-        }
+      if (vocabP) {
+        const apiInv = await vocabP;
+        inventory.vocab = mergeVocabPreferGloss(inventory.vocab, apiInv.vocab);
+        if (apiInv.translation && !inventory.translation) inventory.translation = apiInv.translation;
+        const added = (apiInv.vocab || []).length;
+        inventory.summary = `${inventory.summary || ""} · ${
+          added ? `API 單字 ${added} 詞` : "API 單字已核對"
+        }`.trim();
       }
-    } else if (wantApiVocab && skipVocabApi) {
-      inventory = {
-        summary: "本地單字庫（略過 API）",
-        translation: "",
-        items: [],
-        vocab: [],
-        mode: "local-bank",
-        source: "local-bank",
-      };
     } else if (wantApiVocab) {
-      inventory =
-        typeof AiService.inventoryVocabOnly === "function"
-          ? await AiService.inventoryVocabOnly(form)
-          : await AiService.inventoryGrammar(form, []);
+      inventory = await requestApiVocab(form);
       inventory.mode = "api";
       inventory.source = "api";
       inventory.items = [];
@@ -5361,26 +7724,82 @@ const App = (() => {
     } else {
       inventory = { summary: "", translation: "", items: [], vocab: [], mode: "api", source: "api" };
     }
+    inventory.grammarEnabled = Boolean(modes.apiGrammar);
+    if (typeof KiwiService !== "undefined" && KiwiService.isEnabled()) {
+      try {
+        inventory = await KiwiService.enrichInventory(form, inventory, {
+          includeGrammar:
+            inventory.grammarEnabled &&
+            !(Array.isArray(inventory.tokens) && inventory.tokens.length && !inventory.fallbackLegacy),
+        });
+      } catch (err) {
+        console.warn("[kiwi] enrich failed", err);
+      }
+    }
+    if (wantApiGrammar) {
+      inventory = await finalizeApiGrammarInventory(form, inventory);
+    }
+    keepExistingTranslation(form, inventory);
     return inventory;
   }
 
+  function resolveDisplayedProjectSeq(projectId, query, preferredSeq) {
+    const norm = Storage.normalizeQueryKey(query);
+    if (preferredSeq != null && projectId) {
+      const cur = Storage.findProjectEntryBySeq(projectId, preferredSeq);
+      if (cur && (!norm || Storage.normalizeQueryKey(cur.query) === norm)) {
+        return cur.seq;
+      }
+    }
+    if (!norm || !projectId) return preferredSeq;
+    return Storage.findProjectEntryByQuery(projectId, query)?.seq ?? preferredSeq;
+  }
+
+  function applyPersistEntryTarget(payload, opts = {}) {
+    if (opts.forceNew) {
+      payload.forceNew = true;
+      return;
+    }
+    if (opts.entryId) payload.id = opts.entryId;
+    if (opts.entrySeq != null) payload.seq = opts.entrySeq;
+    if (payload.id || payload.seq != null) return;
+    const pid = opts.projectId || Storage.getActiveProjectId();
+    if (!pid || state.projectCursorSeq == null) return;
+    const cur = Storage.findProjectEntryBySeq(pid, state.projectCursorSeq);
+    if (
+      cur &&
+      Storage.normalizeQueryKey(cur.query) === Storage.normalizeQueryKey(payload.query)
+    ) {
+      payload.id = cur.id;
+      payload.seq = cur.seq;
+    }
+  }
+
   function persistLookupResult(query, inventory, apiHl, opts = {}) {
+    keepExistingTranslation(query, inventory, opts);
     prepareInventoryVocab(inventory, query);
+    inventory.vocab = writeBackVocabLocations(query, inventory.vocab);
     rememberInventoryVocab(inventory, { preferIncoming: false });
     const payload = {
       query,
       summary: inventory.summary || "",
       translation: inventory.translation || "",
+      replaceTranslation: Boolean(opts.replaceTranslation),
       ownedCount: (apiHl.ownedHits || []).length,
       missingCount: (apiHl.missingItems || []).length,
       items: inventory.items || [],
       vocab: inventory.vocab || [],
+      tokens: inventory.tokens || [],
     };
+    applyPersistEntryTarget(payload, opts);
     const activePid = opts.projectId || Storage.getActiveProjectId();
     if (activePid) {
-      const before = Storage.findProjectEntryByQuery(activePid, query);
-      Storage.upsertProjectEntry(activePid, payload);
-      const after = Storage.findProjectEntryByQuery(activePid, query);
+      const before = payload.forceNew
+        ? null
+        : payload.id
+          ? Storage.getProject(activePid)?.entries?.find((e) => e.id === payload.id)
+          : Storage.findProjectEntryByQuery(activePid, query);
+      const after = Storage.upsertProjectEntry(activePid, payload);
       // keepCursor：背景完成時不把游標跳到剛查完的句子
       const viewing = Storage.getActiveProjectId() === activePid;
       if (after?.seq != null && !opts.keepCursor && viewing) state.projectCursorSeq = after.seq;
@@ -5396,23 +7815,6 @@ const App = (() => {
     } else {
       Storage.addHistoryEntry(payload);
       updateLookupNavBtns();
-    }
-  }
-
-  async function runLocalLookup(query) {
-    let inventory = buildLocalInventory(query);
-    inventory = await applyKiwiToInventory(query, inventory);
-    state.lastInventory = inventory;
-    const apiHl =
-      applyInventoryToLookup(query, inventory) || buildApiHighlight(query, inventory);
-    persistLookupResult(query, inventory, apiHl, { silent: true });
-    const n = (apiHl.ownedHits || []).length;
-    const seq = state.projectCursorSeq;
-    const seqNote = Storage.getActiveProjectId() && seq != null ? ` · 專案第 ${seq} 號` : "";
-    if (n) {
-      showToast(`本地查詢：${n} 條規則${seqNote}`, "success");
-    } else {
-      showToast(`本地未命中規則（可選字手動套用，或改 API 模式）${seqNote}`, "info");
     }
   }
 
@@ -5441,7 +7843,7 @@ const App = (() => {
     if (!box) return;
 
     const modes = Storage.loadLookupModes();
-    const anyMode = modes.apiGrammar || modes.localGrammar || modes.apiVocab;
+    const anyMode = modes.apiGrammar || modes.apiVocab;
     // 未開啟任何掃描：仍可查詢、顯示句子，供選字套用／補充用法
     if (!anyMode) {
       let inventory = {
@@ -5451,8 +7853,9 @@ const App = (() => {
         vocab: [],
         mode: "manual",
         source: "manual",
+        grammarEnabled: false,
       };
-      inventory = await applyKiwiToInventory(query, inventory);
+      inventory = await applyKiwiToInventory(query, inventory, { includeGrammar: false });
       state.lastInventory = inventory;
       const apiHl =
         applyInventoryToLookup(query, inventory) || buildApiHighlight(query, inventory);
@@ -5465,20 +7868,8 @@ const App = (() => {
 
     const needApi = modes.apiGrammar || modes.apiVocab;
 
-    // —— 純本地文法 ——
-    if (modes.localGrammar && !needApi) {
-      state.lookupBusy = true;
-      stopGramHlCycles();
-      try {
-        await runLocalLookup(query);
-      } finally {
-        state.lookupBusy = false;
-      }
-      return;
-    }
-
     if (needApi && !Storage.hasApiKey()) {
-      showToast("此模式需要 API Key，請先到「設定」填入（或改開本地文法排查）", "error");
+      showToast("此模式需要 API Key，請先到「設定」填入", "error");
       setView("settings");
       return;
     }
@@ -5490,7 +7881,6 @@ const App = (() => {
     const loadingBits = [];
     if (modes.apiGrammar) loadingBits.push("文法點");
     if (modes.apiVocab) loadingBits.push("單字原形");
-    if (modes.localGrammar) loadingBits.push("本地掃描");
     const loadingHtml =
       `<div class="lookup-result-stack">` +
       sentenceBoardHtml(query, [], null, null, { source: "api", apiLegend: [] }) +
@@ -5513,55 +7903,24 @@ const App = (() => {
     try {
       const wantApiVocab = Boolean(modes.apiVocab);
       const wantApiGrammar = Boolean(modes.apiGrammar);
-      const skipVocabApi =
-        wantApiVocab &&
-        typeof Storage.estimateVocabBankCoverage === "function" &&
-        (() => {
-          const cov = Storage.estimateVocabBankCoverage(query, []);
-          return cov.total >= 2 && cov.ratio >= 0.85 && cov.hit >= 2;
-        })();
       let inventory;
 
-      if (modes.localGrammar) {
-        inventory = buildLocalInventory(query);
-        if (wantApiVocab && !skipVocabApi) {
-          // 本地文法 + API 單字：輕量請求，不帶規則標題
-          const apiInv =
-            typeof AiService.inventoryVocabOnly === "function"
-              ? await AiService.inventoryVocabOnly(query)
-              : await AiService.inventoryGrammar(query, []);
-          inventory.vocab = Array.isArray(apiInv.vocab) ? apiInv.vocab : [];
-          if (apiInv.translation) inventory.translation = apiInv.translation;
-          inventory.summary = `${inventory.summary || ""} · API 單字 ${inventory.vocab.length}`.trim();
-        } else if (wantApiVocab && skipVocabApi) {
-          inventory.vocab = [];
-          inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API）`.trim();
-        }
-      } else if (wantApiGrammar) {
-        const titles = RulesService.getAll().map((r) => r.title);
-        inventory = await AiService.inventoryGrammar(query, titles);
+      if (wantApiGrammar) {
+        const vocabP = wantApiVocab ? requestApiVocab(query) : null;
+        inventory = await fetchApiGrammarInventory(query, false);
         inventory.mode = "api";
         inventory.source = "api";
-        if (!wantApiVocab || skipVocabApi) {
-          inventory.vocab = [];
-          if (skipVocabApi) {
-            inventory.summary = `${inventory.summary || ""} · 單字庫覆蓋（略過 API 單字）`.trim();
-          }
+        if (vocabP) {
+          const apiInv = await vocabP;
+          inventory.vocab = mergeVocabPreferGloss(inventory.vocab, apiInv.vocab);
+          if (apiInv.translation && !inventory.translation) inventory.translation = apiInv.translation;
+          const added = (apiInv.vocab || []).length;
+          inventory.summary = `${inventory.summary || ""} · ${
+            added ? `API 單字 ${added} 詞` : "API 單字已核對"
+          }`.trim();
         }
-      } else if (wantApiVocab && skipVocabApi) {
-        inventory = {
-          summary: "本地單字庫（略過 API）",
-          translation: "",
-          items: [],
-          vocab: [],
-          mode: "local-bank",
-          source: "local-bank",
-        };
       } else if (wantApiVocab) {
-        inventory =
-          typeof AiService.inventoryVocabOnly === "function"
-            ? await AiService.inventoryVocabOnly(query)
-            : await AiService.inventoryGrammar(query, []);
+        inventory = await requestApiVocab(query);
         inventory.mode = "api";
         inventory.source = "api";
         inventory.items = [];
@@ -5571,7 +7930,15 @@ const App = (() => {
         inventory = { summary: "", translation: "", items: [], vocab: [], mode: "api", source: "api" };
       }
 
-      inventory = await applyKiwiToInventory(query, inventory);
+      inventory.grammarEnabled = Boolean(modes.apiGrammar);
+      inventory = await applyKiwiToInventory(query, inventory, {
+        includeGrammar:
+          inventory.grammarEnabled &&
+          !(Array.isArray(inventory.tokens) && inventory.tokens.length && !inventory.fallbackLegacy),
+      });
+      if (wantApiGrammar) {
+        inventory = await finalizeApiGrammarInventory(query, inventory);
+      }
 
       const stillMine = myToken === state.lookupToken;
       const stillViewing = stillMine && isViewingLookupQuery(query);
@@ -5585,7 +7952,7 @@ const App = (() => {
         persistLookupResult(query, inventory, apiHl);
         const nVocab = (inventory.vocab || []).length;
         const nItems = (inventory.items || []).length;
-        if (wantApiVocab && !wantApiGrammar && !modes.localGrammar) {
+        if (wantApiVocab && !wantApiGrammar) {
           showToast(
             nVocab ? `單字查詢完成：${nVocab} 詞` : "API 未回傳單字，請再試一次或選字手動解釋",
             nVocab ? "success" : "info"
@@ -5620,7 +7987,6 @@ const App = (() => {
             <div class="result-banner error" style="margin:0">
               <strong>查詢失敗</strong>
               <span>${esc(err.message || "未知錯誤")}</span>
-              <span class="muted">可在查詢頁上方改為僅本地文法排查。</span>
             </div>
           </section>`;
         if (slot) slot.outerHTML = errHtml;
@@ -5684,6 +8050,9 @@ const App = (() => {
           msg += "（無專案資料）";
         }
         showToast(`已合併匯入：${msg}`, "success");
+        if (result.projects && typeof Storage.flushProjects === "function") {
+          await Storage.flushProjects();
+        }
       } else {
         const merged = Storage.importRulesJSON(text, "merge");
         RulesService.setAll(merged);
@@ -5758,7 +8127,11 @@ const App = (() => {
           .join("");
         return `<li class="vocab-bank-item" data-key="${esc(e.key)}">
           <div class="vocab-bank-main">
-            <p class="vocab-bank-surface">${esc(e.surface || e.key)}${
+            <p class="vocab-bank-surface"><span class="pos-line" data-pos-kind="${esc(
+              posUnderlineKind(e.pos)
+            )}" data-lemma="${esc(e.lemma || "")}" title="${
+              e.lemma ? esc(`點擊複製並朗讀原形「${e.lemma}」`) : ""
+            }">${esc(e.surface || e.key)}</span>${
               e.senseCount > 1
                 ? `<span class="badge badge-api-fallback">${e.senseCount} 義</span>`
                 : ""
@@ -5777,6 +8150,10 @@ const App = (() => {
         </li>`;
       })
       .join("")}</ul>`;
+    box.querySelectorAll(".vocab-bank-surface .pos-line[data-lemma]").forEach((el) => {
+      if (!String(el.dataset.lemma || "").trim()) return;
+      el.addEventListener("click", () => copyLemmaToClipboard(el.dataset.lemma));
+    });
     box.querySelectorAll("[data-vb-delete]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const key = btn.dataset.vbDelete;
@@ -5809,6 +8186,14 @@ const App = (() => {
   }
 
   function bindEvents() {
+    bindPadChrome();
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest?.("[data-pos-toggle]");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      togglePosUnderline(btn.dataset.posToggle);
+    });
     $$(".nav-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         if (btn.dataset.action === "projects") {
@@ -5853,6 +8238,7 @@ const App = (() => {
       state.todoSourceId = null;
       state.pendingSelApply = null;
       state.pendingSupplementaryApply = false;
+      state.pendingCreateFromInventory = null;
       setView(getFormReturnView());
     });
     $("#btn-ai-complete")?.addEventListener("click", () => runAiComplete());
@@ -5869,6 +8255,16 @@ const App = (() => {
     $("#projects-modal")?.addEventListener("click", (e) => {
       if (e.target === e.currentTarget) closeProjectsModal();
     });
+    $("#btn-projects-crumb-root")?.addEventListener("click", () => {
+      state.projectsBrowseId = null;
+      renderProjectsList();
+      $("#project-new-name")?.focus();
+    });
+    $("#project-mode-collection")?.addEventListener("click", () => {
+      const p = Storage.getActiveProject();
+      openProjectsModal({ browseId: p ? p.collectionId || "" : null });
+    });
+    bindCollectionCrumbRename();
     $("#btn-project-create")?.addEventListener("click", () => createProjectFromModal());
     $("#project-new-name")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
@@ -5876,9 +8272,12 @@ const App = (() => {
         createProjectFromModal();
       }
     });
+    bindProjectNameEdit();
     $("#btn-project-leave")?.addEventListener("click", () => leaveProject());
     $("#btn-project-entries")?.addEventListener("click", () => openProjectEntriesModal());
     $("#project-bulk-input")?.addEventListener("input", () => updateBulkImportHint());
+    $("#btn-project-bulk-split")?.addEventListener("click", () => applyBulkSentenceBreaks());
+    $("#btn-project-bulk-split-comma")?.addEventListener("click", () => applyBulkCommaBreaks());
     $("#btn-project-bulk-run")?.addEventListener("click", () => runProjectBulkImport());
     $("#btn-project-bulk-cancel")?.addEventListener("click", () => cancelProjectBulkImport());
     $("#btn-project-bulk-clear")?.addEventListener("click", () => {
@@ -5904,9 +8303,17 @@ const App = (() => {
     $("#btn-vocab-edit-cancel")?.addEventListener("click", () => closeVocabEditModal());
     $("#btn-vocab-edit-ai")?.addEventListener("click", () => runVocabEditAi());
     $("#vocab-edit-form")?.addEventListener("submit", saveVocabEditForm);
-    $("#vocab-edit-modal")?.addEventListener("click", (e) => {
-      if (e.target === e.currentTarget) closeVocabEditModal();
-    });
+    {
+      const overlay = $("#vocab-edit-modal");
+      let pressOnOverlay = false;
+      overlay?.addEventListener("mousedown", (e) => {
+        pressOnOverlay = e.target === overlay;
+      });
+      overlay?.addEventListener("click", (e) => {
+        if (pressOnOverlay && e.target === overlay) closeVocabEditModal();
+        pressOnOverlay = false;
+      });
+    }
     $("#btn-sel-view-rule")?.addEventListener("click", () => {
       const id = $("#btn-sel-view-rule")?.dataset?.ruleId;
       hideSelApplyPop();
@@ -5927,7 +8334,7 @@ const App = (() => {
       if (e.target === e.currentTarget) closeRulePickModal();
     });
     $("#rule-pick-filter")?.addEventListener("input", () => renderRulePickList());
-    document.addEventListener("mousedown", (e) => {
+    const dismissSelApplyIfOutside = (e) => {
       const pop = $("#sel-apply-pop");
       if (!pop || pop.classList.contains("hidden")) return;
       if (pop.contains(e.target)) return;
@@ -5935,14 +8342,18 @@ const App = (() => {
         return;
       }
       hideSelApplyPop();
-    });
-    document.addEventListener("mouseup", (e) => {
+    };
+    document.addEventListener("pointerdown", dismissSelApplyIfOutside);
+    const revealSelApplyOutsideBoard = (e) => {
       if (state.view !== "lookup") return;
       if (e.target.closest && e.target.closest("#sel-apply-pop, button, a, input, textarea")) {
         return;
       }
       if (!$("#sentence-text")) return;
       if (e.target.closest && e.target.closest("#sentence-board")) return;
+      if (!shouldRevealSelApplyFromGesture()) return;
+      suppressWordTipClick = true;
+      const point = eventClientPoint(e);
       requestAnimationFrame(() => {
         const cap = captureSentenceSelection();
         if (!cap) return;
@@ -5955,8 +8366,54 @@ const App = (() => {
           return;
         }
         state.selApply = cap;
-        showSelApplyPop(e.clientX, e.clientY, cap.text, {});
+        showSelApplyPop(point.x, point.y, cap.text, {});
       });
+    };
+    document.addEventListener("mouseup", revealSelApplyOutsideBoard);
+    document.addEventListener("touchend", revealSelApplyOutsideBoard, { passive: true });
+    let selChangeTimer = 0;
+    document.addEventListener("selectionchange", () => {
+      if (!isCoarsePointer() || state.view !== "lookup") return;
+      if (!shouldRevealSelApplyFromGesture()) return;
+      clearTimeout(selChangeTimer);
+      selChangeTimer = window.setTimeout(() => {
+        const cap = captureSentenceSelection();
+        if (!cap) return;
+        if (
+          state.selApply &&
+          state.selApply.text === cap.text &&
+          state.selApply.start === cap.start &&
+          !$("#sel-apply-pop")?.classList.contains("hidden")
+        ) {
+          return;
+        }
+        state.selApply = cap;
+        let x = NaN;
+        let y = NaN;
+        try {
+          const r = window.getSelection()?.getRangeAt(0)?.getBoundingClientRect();
+          x = r.left + r.width / 2;
+          y = r.bottom;
+        } catch {
+          /* ignore */
+        }
+        showSelApplyPop(x, y, cap.text, {});
+      }, 380);
+    });
+
+    document.addEventListener("click", (e) => {
+      const editBtn = e.target.closest("[data-sentence-select-edit]");
+      if (editBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSentenceSelectEdit();
+        return;
+      }
+      const btn = e.target.closest("[data-speak-sentence]");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      speakCurrentSentence();
     });
 
     document.addEventListener("keydown", (e) => {
@@ -5974,6 +8431,10 @@ const App = (() => {
           state.selApply = null;
           return;
         }
+        if (isSentenceSelectEdit()) {
+          setSentenceSelectEdit(false);
+          return;
+        }
         if (state.locateTarget) {
           cancelLocateMode();
           showToast("已取消定位", "info");
@@ -5989,18 +8450,14 @@ const App = (() => {
         return;
       }
 
-      // 左右方向鍵：上一句 / 下一句（查詢頁；輸入中不攔截）
-      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-        if (handleLookupArrowNav(e)) return;
-      }
+      // WASD／ZXCVBNM／方向鍵（輸入中不攔截）
+      handleAppHotkeys(e);
     });
 
     $("#settings-form")?.addEventListener("submit", saveSettingsForm);
+    $("#settings-api-tts")?.addEventListener("change", () => onApiTtsToggle());
     $("#settings-mode-api-grammar")?.addEventListener("change", () =>
       onLookupModeToggle("apiGrammar")
-    );
-    $("#settings-mode-local-grammar")?.addEventListener("change", () =>
-      onLookupModeToggle("localGrammar")
     );
     $("#settings-mode-api-vocab")?.addEventListener("change", () =>
       onLookupModeToggle("apiVocab")
@@ -6009,6 +8466,16 @@ const App = (() => {
     $("#btn-settings-modes-all")?.addEventListener("click", () => onSettingsModesAllClick());
     $("#btn-test-api")?.addEventListener("click", () => testApiConnection());
     $("#btn-clear-key")?.addEventListener("click", () => clearApiKey());
+    $("#settings-api-provider")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-api-provider]");
+      if (!btn) return;
+      switchApiProvider(btn.dataset.apiProvider);
+    });
+    $("#settings-model-shortcuts")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-model-id]");
+      if (!btn) return;
+      applyModelShortcut(btn.dataset.modelId);
+    });
     $("#btn-toggle-key")?.addEventListener("click", () => {
       const input = $("#settings-api-key");
       const btn = $("#btn-toggle-key");
@@ -6036,6 +8503,13 @@ const App = (() => {
 
   async function init() {
     applyStructureTheme(Storage.loadSettings().structureTheme);
+    try {
+      if (typeof Storage.initProjectsDb === "function") {
+        await Storage.initProjectsDb();
+      }
+    } catch (err) {
+      console.warn("[projects idb init]", err);
+    }
     bindEvents();
     try {
       const rules = await Storage.initWithSeed();

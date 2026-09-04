@@ -94,6 +94,104 @@ const KiwiService = (() => {
     return c >= 0xac00 && c <= 0xd7a3;
   }
 
+  function hasBatchim(ch) {
+    const c = String(ch || "").charCodeAt(0);
+    if (c < 0xac00 || c > 0xd7a3) return false;
+    return (c - 0xac00) % 28 !== 0;
+  }
+
+  /** 副詞／時間處所＋은/는 常被切成一個詞（더는、다시는、이제는） */
+  const TOPIC_FUSION_HOSTS = new Set([
+    "더",
+    "다시",
+    "이제",
+    "지금",
+    "아직",
+    "절대",
+    "항상",
+    "언제나",
+    "조금",
+    "모두",
+    "가끔",
+    "늘",
+    "자주",
+    "전혀",
+    "별로",
+    "아무",
+    "오늘",
+    "내일",
+    "어제",
+    "이번",
+    "다음",
+    "처음",
+    "나중",
+    "평소",
+    "원래",
+    "사실",
+    "보통",
+    "일단",
+    "우선",
+    "먼저",
+    "특히",
+    "정말",
+    "진짜",
+    "그냥",
+    "역시",
+    "오히려",
+    "어차피",
+    "분명히",
+    "매일",
+    "방금",
+    "금방",
+    "당장",
+    "곧",
+    "이미",
+    "앞",
+    "뒤",
+    "후",
+    "전",
+    "안",
+    "밖",
+    "속",
+    "위",
+    "아래",
+    "옆",
+    "여기",
+    "거기",
+    "저기",
+    "혼자",
+    "함께",
+    "따로",
+    "계속",
+    "누구",
+    "무엇",
+    "어디",
+    "언제",
+  ]);
+
+  function topicParticleForHost(host) {
+    const last = String(host || "").slice(-1);
+    return hasBatchim(last) ? "은" : "는";
+  }
+
+  function fusedTopicFromForm(form) {
+    const f = canonForm(form);
+    if (f.length < 2) return null;
+    const particle = f.slice(-1);
+    if (particle !== "는" && particle !== "은") return null;
+    const host = f.slice(0, -1);
+    if (!TOPIC_FUSION_HOSTS.has(host)) return null;
+    if (topicParticleForHost(host) !== particle) return null;
+    return { host, particle, surface: f };
+  }
+
+  function fusedTopicSurfaces() {
+    return [...TOPIC_FUSION_HOSTS].map((host) => {
+      const particle = topicParticleForHost(host);
+      return { host, particle, surface: host + particle };
+    });
+  }
+
   function canonForm(s) {
     return String(s || "")
       .normalize("NFC")
@@ -187,7 +285,7 @@ const KiwiService = (() => {
 
   function ensureWorker() {
     if (worker) return worker;
-    const url = assetUrl("js/kiwi-worker.js");
+    const url = assetUrl("js/kiwi-worker.js?v=koparse1");
     worker = new Worker(url, { type: "module" });
     worker.onmessage = (ev) => {
       const msg = ev.data || {};
@@ -313,7 +411,12 @@ const KiwiService = (() => {
    */
   function tokenSurfaceRange(text, tok) {
     const src = String(text || "");
-    const start = Number(tok?.position) || 0;
+    const visStart = Number(tok?.start);
+    const visEnd = Number(tok?.end);
+    if (Number.isFinite(visStart) && Number.isFinite(visEnd) && visEnd > visStart) {
+      return { start: visStart, end: visEnd };
+    }
+    const start = Number(tok?.position ?? tok?.kiwiPosition) || 0;
     const len = Number(tok?.length) || 0;
     if (len > 0) {
       const end = Math.min(src.length, start + len);
@@ -402,30 +505,120 @@ const KiwiService = (() => {
               prevForm,
             })
           );
-        } else if ((form === "ㄴ" || form === "은") && isAdjish(prevTag)) {
+        } else if (form === "던" && isPred(prevTag)) {
           pushUnique(
             hits,
-            makeHit("etm-n-eun", src, tok, {
-              reason: "形容詞冠形 -ㄴ/은（ETM，含받침）",
+            makeHit("etm-deon", src, tok, {
+              reason: "過去回想冠形 -던（ETM）",
               score: 38,
               prevTag,
               prevForm,
             })
           );
+        } else if ((form === "ㄴ" || form === "은") && isPred(prevTag)) {
+          const viaCopula = baseTag(prevTag) === "VCP";
+          pushUnique(
+            hits,
+            makeHit("etm-n-eun", src, tok, {
+              reason: viaCopula
+                ? "指定詞冠形 -ㄴ/은（VCP＋ETM，인）"
+                : isAdjish(prevTag)
+                  ? "形容詞冠形 -ㄴ/은（ETM，含받침）"
+                  : "動詞過去冠形 -ㄴ/은（ETM，含받침）",
+              score: 38,
+              prevTag,
+              prevForm,
+            })
+          );
+        } else if ((form === "ㄹ" || form === "을") && isPred(prevTag)) {
+          const n2Form = toks[i + 2] ? canonForm(toks[i + 2].str) : "";
+          if (nextForm === "수" && /^없/.test(n2Form)) {
+            const start = tokenSurfaceRange(src, tok).start;
+            const end = tokenSurfaceRange(src, toks[i + 2]).end;
+            pushUnique(
+              hits,
+              makeHit("eul-su-eob", src, tok, {
+                start,
+                end,
+                text: src.slice(start, end),
+                reason: "不可能 -ㄹ 수 없다",
+                score: 38,
+                prevTag,
+                prevForm,
+              })
+            );
+          } else if (nextForm === "수" && /^있/.test(n2Form)) {
+            const start = tokenSurfaceRange(src, tok).start;
+            const end = tokenSurfaceRange(src, toks[i + 2]).end;
+            pushUnique(
+              hits,
+              makeHit("eul-su-it", src, tok, {
+                start,
+                end,
+                text: src.slice(start, end),
+                reason: "可能 -ㄹ 수 있다",
+                score: 38,
+                prevTag,
+                prevForm,
+              })
+            );
+          } else if (
+            (nextForm === "거" || nextForm === "것") &&
+            /^(야|예요|에요|이다|입니다|이야)$/.test(n2Form)
+          ) {
+            const start = tokenSurfaceRange(src, tok).start;
+            const end = tokenSurfaceRange(src, toks[i + 2]).end;
+            pushUnique(
+              hits,
+              makeHit("eul-geoya", src, tok, {
+                start,
+                end,
+                text: src.slice(start, end),
+                reason: "將會／打算 -ㄹ 거야",
+                score: 38,
+                prevTag,
+                prevForm,
+              })
+            );
+          } else {
+            pushUnique(
+              hits,
+              makeHit("etm-l-eul", src, tok, {
+                reason: "未來／冠形 -(으)ㄹ（ETM，含받침）",
+                score: 36,
+                prevTag,
+                prevForm,
+              })
+            );
+          }
         }
       }
 
-      if (bt === "JX" && (form === "은" || form === "는")) {
+      if (bt === "JX" && form === "만") {
+        pushUnique(
+          hits,
+          makeHit("jx-man", src, tok, { reason: "限定助詞 만（JX）", score: 34, prevTag, prevForm })
+        );
+      }
+
+      if ((bt === "MAG" || bt === "MAJ") && form === "안") {
+        pushUnique(
+          hits,
+          makeHit("neg-an", src, tok, { reason: "簡略否定 안（MAG）", score: 34, prevTag, prevForm })
+        );
+      }
+
+      if (bt === "JX" && (form === "은" || form === "는" || form === "ㄴ")) {
         const host = tokenSurfaceRange(src, prev || tok);
         const self = tokenSurfaceRange(src, tok);
         const fused = src.slice(host.start, self.end);
-        if (fused === "난" && prevForm === "나") {
+        if (fused === "난" && (prevForm === "나" || form === "ㄴ")) {
           pushUnique(hits, makeHit("contr-nan", src, tok, { start: host.start, end: self.end, text: "난", reason: "나＋는→난", score: 40 }));
-        } else if (fused === "넌" && prevForm === "너") {
+        } else if (fused === "넌" && (prevForm === "너" || form === "ㄴ")) {
           pushUnique(hits, makeHit("contr-neon", src, tok, { start: host.start, end: self.end, text: "넌", reason: "너＋는→넌", score: 40 }));
-        } else if (fused === "전" && prevForm === "저") {
+        } else if (fused === "전" && (prevForm === "저" || form === "ㄴ")) {
           pushUnique(hits, makeHit("contr-jeon", src, tok, { start: host.start, end: self.end, text: "전", reason: "저＋는→전", score: 40 }));
-        } else {
+        } else if (form === "은" || form === "는") {
           pushUnique(
             hits,
             makeHit("jx-topic", src, tok, { reason: "主題助詞 은/는（JX）", score: 34, prevTag, prevForm })
@@ -433,22 +626,114 @@ const KiwiService = (() => {
         }
       }
 
-      if (bt === "JKO" && (form === "을" || form === "를")) {
-        const host = tokenSurfaceRange(src, prev || tok);
+      const fusedTopic = fusedTopicFromForm(form);
+      if (fusedTopic && bt !== "JX" && bt !== "ETM") {
         const self = tokenSurfaceRange(src, tok);
-        const fused = src.slice(host.start, self.end);
-        if (fused === "날" && prevForm === "나") {
-          pushUnique(hits, makeHit("contr-nal", src, tok, { start: host.start, end: self.end, text: "날", reason: "나＋를→날", score: 40 }));
-        } else if (fused === "널" && prevForm === "너") {
-          pushUnique(hits, makeHit("contr-neol", src, tok, { start: host.start, end: self.end, text: "널", reason: "너＋를→널", score: 40 }));
-        } else if (fused === "절" && prevForm === "저") {
-          pushUnique(hits, makeHit("contr-jeol", src, tok, { start: host.start, end: self.end, text: "절", reason: "저＋를→절", score: 40 }));
-        } else {
-          pushUnique(hits, makeHit("jko-object", src, tok, { reason: "賓格 을/를（JKO）", score: 34 }));
+        if (self.end > self.start) {
+          pushUnique(
+            hits,
+            makeHit("jx-topic", src, tok, {
+              start: self.end - fusedTopic.particle.length,
+              end: self.end,
+              text: fusedTopic.particle,
+              reason: `${fusedTopic.host}＋${fusedTopic.particle}（融合主題）`,
+              score: 36,
+              prevTag,
+              prevForm,
+            })
+          );
         }
       }
 
-      if (bt === "JKS" && (form === "이" || form === "가")) {
+      // 더/MAG＋는/ETM：Kiwi 常把副詞主題切成「冠形 는」，仍應掛主題
+      if ((form === "는" || form === "은") && bt !== "JX") {
+        const fusedSplit = fusedTopicFromForm(prevForm + form);
+        if (fusedSplit) {
+          const self = tokenSurfaceRange(src, tok);
+          if (self.end > self.start) {
+            pushUnique(
+              hits,
+              makeHit("jx-topic", src, tok, {
+                start: self.start,
+                end: self.end,
+                text: form,
+                reason: `${fusedSplit.host}＋${fusedSplit.particle}（分詞融合主題）`,
+                score: 36,
+                prevTag,
+                prevForm,
+              })
+            );
+          }
+        }
+      }
+
+      // 움직임은 整詞 NNG：詞尾 은/는 仍是主題（非冠形）
+      if (!fusedTopic && (bt === "NNG" || bt === "NNP" || bt === "NP" || bt === "NNB")) {
+        const particle = form.slice(-1);
+        if ((particle === "는" || particle === "은") && form.length >= 2) {
+          const host = form.slice(0, -1);
+          if (topicParticleForHost(host) === particle) {
+            const self = tokenSurfaceRange(src, tok);
+            if (self.end > self.start) {
+              pushUnique(
+                hits,
+                makeHit("jx-topic", src, tok, {
+                  start: self.end - particle.length,
+                  end: self.end,
+                  text: particle,
+                  reason: `${host}＋${particle}（詞尾主題）`,
+                  score: 34,
+                  prevTag,
+                  prevForm,
+                })
+              );
+            }
+          }
+        }
+      }
+
+      if (bt === "JKG" && form === "의") {
+        pushUnique(hits, makeHit("jkg-ui", src, tok, { reason: "所有格 의（JKG）", score: 34 }));
+      }
+      if ((form === "내" || form === "네" || form === "제") && nextForm !== "가") {
+        const self = tokenSurfaceRange(src, tok);
+        pushUnique(
+          hits,
+          makeHit("jkg-ui", src, tok, {
+            start: self.start,
+            end: self.end,
+            text: form,
+            reason: form === "내" ? "나＋의→내" : form === "네" ? "너＋의→네" : "저＋의→제",
+            score: 36,
+          })
+        );
+      }
+
+      if (bt === "JKO" && (form === "을" || form === "를" || form === "ㄹ")) {
+        const host = tokenSurfaceRange(src, prev || tok);
+        const self = tokenSurfaceRange(src, tok);
+        const fused = src.slice(host.start, self.end);
+        if (fused === "날" && (prevForm === "나" || form === "ㄹ")) {
+          pushUnique(hits, makeHit("contr-nal", src, tok, { start: host.start, end: self.end, text: "날", reason: "나＋를→날", score: 40 }));
+        } else if (fused === "널" && (prevForm === "너" || form === "ㄹ")) {
+          pushUnique(hits, makeHit("contr-neol", src, tok, { start: host.start, end: self.end, text: "널", reason: "너＋를→널", score: 40 }));
+        } else if (fused === "절" && (prevForm === "저" || form === "ㄹ")) {
+          pushUnique(hits, makeHit("contr-jeol", src, tok, { start: host.start, end: self.end, text: "절", reason: "저＋를→절", score: 40 }));
+        } else if (form === "을" || form === "를" || form === "ㄹ") {
+          pushUnique(
+            hits,
+            makeHit("jko-object", src, tok, {
+              start: form === "ㄹ" ? host.start : self.start,
+              end: self.end,
+              text: form === "ㄹ" ? fused || src.slice(host.start, self.end) : form,
+              reason: form === "ㄹ" ? "賓格 을/를（JKO，ㄹ받침）" : "賓格 을/를（JKO）",
+              score: 34,
+            })
+          );
+        }
+      }
+
+      if ((bt === "JKS" || bt === "JKC") && (form === "이" || form === "가")) {
         const wordLeft = (() => {
           let l = tokenSurfaceRange(src, tok).start;
           while (l > 0 && isHangulSyllable(src[l - 1])) l--;
@@ -462,8 +747,18 @@ const KiwiService = (() => {
             }
           }
         } else {
-          pushUnique(hits, makeHit("jks-subject", src, tok, { reason: "主格 이/가（JKS）", score: 34 }));
+          pushUnique(
+            hits,
+            makeHit("jks-subject", src, tok, {
+              reason: bt === "JKC" ? "主格／補格 이/가（JKC）" : "主格 이/가（JKS）",
+              score: 34,
+            })
+          );
         }
+      }
+
+      if (bt === "EC" && /^(어|아|여)$/.test(form)) {
+        pushUnique(hits, makeHit("ef-haeche", src, tok, { reason: "平語 해체（EC 아/어）", score: 26 }));
       }
 
       if (bt === "JKB") {
@@ -532,6 +827,12 @@ const KiwiService = (() => {
           const end = tokenSurfaceRange(src, next).end;
           pushUnique(hits, makeHit("neg-ji", src, tok, { start, end, reason: "否定 -지 않다", score: 36 }));
         }
+        if (form === "게") {
+          const hostForm = prevForm;
+          if (hostForm !== "이" && hostForm !== "그" && hostForm !== "저") {
+            pushUnique(hits, makeHit("ec-ge", src, tok, { reason: "副詞化 -게（EC）", score: 34 }));
+          }
+        }
       }
 
       if ((form === "줘" || form === "줘요" || form === "주세요") && (isPred(tag) || bt === "VV" || bt === "VX" || bt === "EF" || bt === "EC")) {
@@ -561,18 +862,65 @@ const KiwiService = (() => {
       ) {
         pushUnique(hits, makeHit("vowel-yeo", src, tok, { reason: "母音縮約 이＋어→여", score: 28 }));
       }
-      if (form === "돼" || form === "됐" || (prevForm === "되" && /^(어|었|여)/.test(form))) {
-        pushUnique(hits, makeHit("vowel-dwae", src, tok, { reason: "母音縮約 되＋어→돼", score: 30 }));
+      // 只認已縮約表面 돼／됐。되＋어＝未縮約「되어」，不是這張卡。
+      if (
+        form === "돼" ||
+        form === "됐" ||
+        /^(돼|됐)/.test(form) ||
+        (prevForm === "되" && /^(돼|됐)/.test(form))
+      ) {
+        const span = tokenSurfaceRange(src, tok);
+        const surf = src.slice(
+          prevForm === "되" ? tokenSurfaceRange(src, prev).start : span.start,
+          span.end
+        );
+        if (/돼|됐/.test(surf)) {
+          pushUnique(hits, makeHit("vowel-dwae", src, tok, { reason: "母音縮約 되＋어→돼", score: 30 }));
+        }
       }
 
-      if (/-I$/.test(tag) && isPred(tag)) {
-        const nxt = nextForm;
-        if (/^(워|와|우|오)/.test(nxt) || /워|와/.test(form)) {
-          pushUnique(hits, makeHit("irr-b", src, tok, { reason: "ㅂ 不規則", score: 30 }));
-        } else if (/르$/.test(form) || /^(라|러|ㄹ라|ㄹ러)/.test(nxt)) {
-          pushUnique(hits, makeHit("irr-reu", src, tok, { reason: "르 不規則", score: 30 }));
-        } else if (/^(들|걸|물)/.test(nxt) || /ㄷ/.test(form)) {
-          pushUnique(hits, makeHit("irr-d", src, tok, { reason: "ㄷ 不規則", score: 28 }));
+      // 不規則：比原形詞幹與該語素表面；沒脫落就不標。不靠 -I。
+      // 르 불규칙：라／러 常在下一個語素（몰+라요），詞幹語素表面可能只有 몰／빨。
+      if (isPred(tag) && bt !== "VCP" && typeof StemDrop !== "undefined") {
+        const span = tokenSurfaceRange(src, tok);
+        if (span.end > span.start) {
+          const tokenSurf = src.slice(span.start, span.end);
+          let wideEnd = span.end;
+          if (next) {
+            const ns = tokenSurfaceRange(src, next);
+            if (ns.end > wideEnd) wideEnd = ns.end;
+          } else if (span.end < src.length && isHangulSyllable(src[span.end])) {
+            wideEnd += 1;
+          }
+          const wideSurf = src.slice(span.start, wideEnd);
+          let drop = StemDrop.classifyStemDrop(form, tokenSurf);
+          if (!drop && wideSurf !== tokenSurf) {
+            drop = StemDrop.classifyStemDrop(form, wideSurf);
+          }
+          // 하다→해 是母音縮約，不是 ㅎ 불규칙（ㅎ 받침脫落）
+          if (drop && drop.kind === "ㅎ" && /하$/.test(String(drop.lemma || form || ""))) {
+            drop = null;
+          }
+          const hintKind = drop && StemDrop.KIND_TO_HINT[drop.kind];
+          if (hintKind) {
+            let hitStart = span.start;
+            let hitEnd = span.end;
+            if (drop.kind === "르" && typeof StemDrop.extendReuHitRange === "function") {
+              const ext = StemDrop.extendReuHitRange(src, span.start, wideEnd);
+              hitStart = ext.start;
+              hitEnd = ext.end;
+            }
+            pushUnique(
+              hits,
+              makeHit(hintKind, src, tok, {
+                start: hitStart,
+                end: hitEnd,
+                text: srcSlice(src, hitStart, hitEnd),
+                reason: StemDrop.formatReason(drop),
+                score: 34,
+              })
+            );
+          }
         }
       }
 
@@ -588,10 +936,48 @@ const KiwiService = (() => {
 
   const HINT_MATCHERS = {
     "etm-neun": (blob, title) => /冠形|관형|定語/.test(blob) && /는/.test(title) && !/ㄴ\s*\/\s*은|-ㄴ/.test(title),
-    "etm-n-eun": (blob, title) => /冠形|관형|定語/.test(blob) && (/ㄴ\s*\/\s*은|-ㄴ\/은|／은|-ㄴ/.test(blob) || /形容詞/.test(blob)),
-    "jx-topic": (blob) => /主題/.test(blob) && /은\s*\/\s*는|은\/는/.test(blob) && !/縮約|冠形/.test(blob),
-    "jks-subject": (blob) => /主格/.test(blob) && /이\s*\/\s*가|이\/가/.test(blob),
+    "etm-n-eun": (blob, title) => {
+      const t = String(title || "");
+      // 形容詞現在冠形 -ㄴ/은，不能只因說明提到「冠形」就命中
+      // 過去冠形卡或詞彙卡（如 不同的（다른））。
+      const hasMarker = /ㄴ\s*[\/／]\s*은|-ㄴ\/은|[（(]\s*-?ㄴ\s*[\/／]\s*은\s*[）)]/.test(t);
+      return hasMarker && /冠形|관형|定語/.test(blob) && !/過去|과거|past/i.test(blob);
+    },
+    "etm-deon": (blob, title) => /던/.test(String(title || "") + blob) && /冠形|관형|回想|회상|語尾/.test(blob),
+    "etm-l-eul": (blob, title) => {
+      const t = String(title || "");
+      const b = String(blob || "");
+      if (/ㄹ\s*탈락|ㄹ\s*脫落/.test(t) || /만하/.test(t)) return false;
+      if (/거야|거예요|거다|것이다/.test(t + b)) return false;
+      if (/수\s*없|수\s*있|不可能/.test(t + b) && !/未來推測|未來冠形|推測冠形/.test(t)) return false;
+      if (/未來推測|未來冠形|推測冠形/.test(b) && !/거야|수\s*없|수\s*있/.test(t)) return true;
+      if (
+        /\(으\)ㄹ|-을\s*\/\s*ㄹ|-을\/ㄹ/.test(t) &&
+        /未來|推測|冠形|관형|定語/.test(b) &&
+        !/거야|수\s*없/.test(t)
+      ) {
+        return true;
+      }
+      return /未來|推測/.test(t) && /\(으\)ㄹ|을\s*\/\s*ㄹ|-ㄹ/.test(t) && !/거야|수\s*없/.test(t);
+    },
+    "eul-geoya": (blob, title) => /거야|거예요|거다|것이다/.test(String(title || "") + blob),
+    "eul-su-eob": (blob) => /수\s*없|不可能/.test(blob),
+    "eul-su-it": (blob, title) => /수\s*있/.test(blob) && !/수\s*없|不可能/.test(String(title || "") + blob),
+    "jx-topic": (blob, title) => {
+      const t = String(title || "");
+      if (/縮約/.test(t) || /冠形詞形|冠形語尾/.test(t)) return false;
+      if (!/主題|話題/.test(t)) return false;
+      return /은\s*\/\s*는|은\/는/.test(t) || /[（(]\s*-?[은는]\s*[）)]/.test(t);
+    },
+    "neg-an": (blob, title) =>
+      /[（(]\s*안\s*[）)]/.test(title) && /簡略|短形|부사|否定/.test(blob) && !/지\s*않|못/.test(title),
+    "jx-man": (blob, title) =>
+      /만/.test(title) && /限定|한정|只有|助詞|조사/.test(blob) && !/만하/.test(blob + title),
+    "jks-subject": (blob, title) =>
+      /主格/.test(title) && /이\s*\/\s*가|이\/가/.test(title) && !/듯이|比喻/.test(title),
     "jko-object": (blob) => /賓格/.test(blob) && /을\s*\/\s*를|을\/를/.test(blob),
+    "jkg-ui": (blob, title) =>
+      /（의）|\(의\)/.test(title) && /所有格|定語助詞|所有格助詞|屬格|冠形格|관형격/.test(blob) && !/冠形詞形/.test(blob),
     "jkb-e": (blob, title) => /時間地點|處所/.test(blob) && /（에）|\(에\)|^時間地點（에）/.test(title + blob) && !/에서/.test(title),
     "jkb-eseo": (blob) => /에서/.test(blob) && /處所|來源|에서/.test(blob),
     "ef-haeyo": (blob) => /禮貌體|해요體|아\s*\/\s*어요/.test(blob) && !/합니다|습니다/.test(blob),
@@ -599,6 +985,8 @@ const KiwiService = (() => {
     "ef-hamnida": (blob) => /正式體|합니다|습니다|합쇼/.test(blob),
     "ep-past": (blob) => /過去/.test(blob) && /았|었/.test(blob),
     "ep-si": (blob) => /主體敬語|尊待|-시-/.test(blob) || /（-시-）/.test(blob),
+    "ec-ge": (blob, title) =>
+      /副詞化|부사화|副詞形/.test(blob) && /게/.test(title + blob) && !/에게/.test(title),
     "ec-go": (blob, title) => /並列/.test(blob) && /고/.test(title) && !/있다|싶다/.test(blob),
     "ec-aseo": (blob) => /原因連接|아\s*\/\s*어서/.test(blob),
     "ec-nde-v": (blob, title) => /背景對比|는데/.test(blob) && /는데/.test(title) && !/은데|인데/.test(title),
@@ -615,7 +1003,11 @@ const KiwiService = (() => {
     "vowel-dwae": (blob) => /母音縮約/.test(blob) && /되\s*＋\s*어|→돼/.test(blob),
     "irr-b": (blob) => /ㅂ\s*不規則|ㅂ\s*불규칙/.test(blob),
     "irr-d": (blob) => /ㄷ\s*不規則|ㄷ\s*불규칙/.test(blob),
+    "irr-s": (blob) => /ㅅ\s*不規則|ㅅ\s*불규칙/.test(blob),
     "irr-reu": (blob) => /르\s*不規則|르\s*불규칙/.test(blob),
+    "irr-h": (blob) => /ㅎ\s*不規則|ㅎ\s*불규칙/.test(blob),
+    "l-del": (blob) => /ㄹ\s*탈락|ㄹ\s*脫落|ㄹ\s*不規則|ㄹ\s*불규칙/.test(blob) && !/르\s*不規則|르\s*불규칙/.test(blob),
+    "eu-del": (blob) => /ㅡ\s*탈락|ㅡ\s*脫落|으\s*탈락|으\s*脫落/.test(blob),
     "contr-nan": (blob, title) => /縮約/.test(blob) && /난/.test(title),
     "contr-neon": (blob, title) => /縮約/.test(blob) && /넌/.test(title),
     "contr-jeon": (blob, title) => /縮約/.test(blob) && /전/.test(title) && /主題/.test(blob),
@@ -628,9 +1020,15 @@ const KiwiService = (() => {
   const SEED_KIND = {
     "etm-neun": "seed-adnominal-neun",
     "etm-n-eun": "seed-adnominal-eun",
+    "etm-l-eul": "seed-adnominal-eul",
+    "etm-deon": "",
+    "eul-geoya": "",
+    "eul-su-eob": "",
+    "eul-su-it": "",
     "jx-topic": "seed-topic",
     "jks-subject": "seed-subject",
     "jko-object": "seed-object",
+    "jkg-ui": "seed-ui",
     "jkb-e": "seed-e",
     "jkb-eseo": "seed-eseo",
     "ef-haeyo": "seed-haeyo",
@@ -654,7 +1052,11 @@ const KiwiService = (() => {
     "vowel-dwae": "seed-vowel-dwae",
     "irr-b": "seed-b-irregular",
     "irr-d": "seed-d-irregular",
+    "irr-s": "seed-s-irregular",
     "irr-reu": "seed-reu-irregular",
+    "irr-h": "seed-h-irregular",
+    "l-del": "seed-l-deletion",
+    "eu-del": "seed-eu-deletion",
     "contr-nan": "seed-topic-contraction-nan",
     "contr-neon": "seed-topic-contraction-neon",
     "contr-jeon": "seed-topic-contraction-jeon",
@@ -677,7 +1079,16 @@ const KiwiService = (() => {
   }
 
   function findRulesForHint(hint, rules) {
-    return (rules || []).filter((r) => ruleMatchesHint(r, hint));
+    return (rules || []).filter((r) => {
+      if (
+        typeof RulesService !== "undefined" &&
+        typeof RulesService.isSupplementaryUsage === "function" &&
+        RulesService.isSupplementaryUsage(r)
+      ) {
+        return false;
+      }
+      return ruleMatchesHint(r, hint);
+    });
   }
 
   function hintsForTokensInSpan(text, tokens, start, end) {
@@ -711,6 +1122,20 @@ const KiwiService = (() => {
         const span = hit.text || src.slice(hit.start, hit.end) || rule.title;
         const key = `${rule.id}:${hit.start}:${hit.end}`;
         if (seen.has(key)) continue;
+        if (typeof AffixGate !== "undefined" && AffixGate.accept) {
+          const loc = {
+            start: hit.start,
+            end: hit.end > hit.start ? hit.end : hit.start + Math.max(1, span.length),
+            text: span,
+          };
+          const profile = AffixGate.inferProfile(rule, { span, name: rule.title });
+          if (
+            profile &&
+            !AffixGate.accept(src, loc, profile, { tokens, item: { span, name: rule.title } })
+          ) {
+            continue;
+          }
+        }
         seen.add(key);
         const parsed =
           typeof RulesService.parseBilingualTitle === "function"
@@ -758,17 +1183,32 @@ const KiwiService = (() => {
     return out;
   }
 
-  async function enrichInventory(query, inventory) {
-    if (!isEnabled()) return inventory;
+  function enrichInventoryFromTokens(query, inventory, tokens, opts = {}) {
     const inv = inventory && typeof inventory === "object" ? inventory : { items: [] };
-    try {
-      const tokens = await tokenize(query);
+    if (
+      (!Array.isArray(inv.tokens) || !inv.tokens.length) &&
+      typeof KoParse !== "undefined" &&
+      KoParse.fromKiwi
+    ) {
+      inv.tokens = KoParse.slimTokens(KoParse.fromKiwi(query, tokens));
+    }
+    // Kiwi 本身可繼續提供切詞／hover；只有文法掃描模式開啟時才可掛規則卡。
+    if (opts.includeGrammar !== false) {
       const extra = buildInventoryItems(query, tokens, RulesService.getAll());
       inv.items = mergeItems(inv.items, extra);
+    }
+    return inv;
+  }
+
+  async function enrichInventory(query, inventory, opts = {}) {
+    if (!isEnabled()) return inventory;
+    try {
+      const tokens = await tokenize(query);
+      return enrichInventoryFromTokens(query, inventory, tokens, opts);
     } catch (err) {
       console.warn("[kiwi] enrich skipped", err);
     }
-    return inv;
+    return inventory;
   }
 
   function warmup() {
@@ -791,9 +1231,13 @@ const KiwiService = (() => {
     hintsForSpan,
     hintsForTokensInSpan,
     ruleMatchesHint,
+    fusedTopicFromForm,
+    fusedTopicSurfaces,
+    seedIdForKind: (kind) => SEED_KIND[String(kind || "")] || "",
     findRulesForHint,
     buildInventoryItems,
     mergeItems,
+    enrichInventoryFromTokens,
     enrichInventory,
   };
 })();

@@ -1,6 +1,6 @@
 /**
- * 規則／待辦／設定持久化（localStorage + 種子）
- * 鍵名 kgn_*（Korean Grammar Notebook）
+ * 規則／待辦／設定：localStorage（kgn_*）
+ * 專案句子快照：IndexedDB（kgn_idb_v1），不受約 5MB 上限
  */
 const Storage = (() => {
   const RULES_KEY = "kgn_rules_v1";
@@ -11,6 +11,10 @@ const Storage = (() => {
   const HISTORY_KEY = "kgn_history_v1";
   const HISTORY_MAX = 40;
   const PROJECTS_KEY = "kgn_projects_v1";
+  const IDB_NAME = "kgn_idb_v1";
+  const IDB_VERSION = 1;
+  const IDB_STORE = "kv";
+  const IDB_PROJECTS_KEY = "projects_v1";
   const ACTIVE_PROJECT_KEY = "kgn_active_project_v1";
   const VOCAB_BANK_KEY = "kgn_vocab_bank_v1";
   const VOCAB_BANK_MAX = 5000;
@@ -40,10 +44,171 @@ const Storage = (() => {
     apiKey: "",
     baseUrl: "https://api.x.ai/v1",
     model: "grok-4.5",
+    apiProvider: "grok",
+    apiProfiles: {},
     structureTheme: "indigo",
     kiwiEnabled: true,
+    apiTtsEnabled: false,
     lookupModes: { ...DEFAULT_LOOKUP_MODES },
   };
+
+  const API_PROVIDERS = [
+    {
+      id: "grok",
+      label: "Grok",
+      hint: "SpaceXAI / xAI · OpenAI 相容",
+      signup: "https://console.x.ai",
+      signupLabel: "console.x.ai",
+      keyPlaceholder: "xAI API Key",
+      baseUrl: "https://api.x.ai/v1",
+      defaultModel: "grok-4.6",
+      urlLocked: true,
+      models: [
+        { id: "grok-4.6", label: "Grok 4.6" },
+        { id: "grok-4.5", label: "Grok 4.5" },
+        { id: "grok-4-1-fast", label: "Grok 4.1 Fast" },
+        { id: "grok-code-fast-1", label: "Grok Code Fast" },
+      ],
+    },
+    {
+      id: "google",
+      label: "Google",
+      hint: "Gemini · OpenAI 相容端點",
+      signup: "https://aistudio.google.com/apikey",
+      signupLabel: "Google AI Studio",
+      keyPlaceholder: "Gemini API Key",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      defaultModel: "gemini-2.5-flash",
+      urlLocked: true,
+      models: [
+        { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+        { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+        { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
+        { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+      ],
+    },
+    {
+      id: "deepseek",
+      label: "DeepSeek",
+      hint: "DeepSeek Chat / Reasoner · OpenAI 相容",
+      signup: "https://platform.deepseek.com",
+      signupLabel: "platform.deepseek.com",
+      keyPlaceholder: "DeepSeek API Key",
+      baseUrl: "https://api.deepseek.com/v1",
+      defaultModel: "deepseek-chat",
+      urlLocked: true,
+      models: [
+        { id: "deepseek-chat", label: "DeepSeek Chat" },
+        { id: "deepseek-reasoner", label: "DeepSeek Reasoner" },
+      ],
+    },
+    {
+      id: "custom",
+      label: "自訂",
+      hint: "其他 OpenAI 相容端點（自行填 Base URL 與模型名）",
+      signup: "",
+      signupLabel: "",
+      keyPlaceholder: "API Key",
+      baseUrl: "",
+      defaultModel: "",
+      urlLocked: false,
+      models: [],
+    },
+  ];
+
+  function getApiProvider(id) {
+    return API_PROVIDERS.find((p) => p.id === id) || API_PROVIDERS[0];
+  }
+
+  function inferApiProviderId(settings) {
+    const explicit = String(settings?.apiProvider || "").trim();
+    if (API_PROVIDERS.some((p) => p.id === explicit)) return explicit;
+    const url = String(settings?.baseUrl || "").toLowerCase();
+    if (/generativelanguage\.googleapis\.com/.test(url)) return "google";
+    if (/deepseek\.com/.test(url)) return "deepseek";
+    if (/x\.ai/.test(url) || !url.trim()) return "grok";
+    return "custom";
+  }
+
+  function canonicalizeBaseUrl(url, providerId) {
+    const preset = getApiProvider(providerId);
+    let next = String(url || "").trim().replace(/\/+$/, "");
+    if (preset.urlLocked && preset.baseUrl) {
+      return String(preset.baseUrl).trim().replace(/\/+$/, "");
+    }
+    if (/^https?:\/\/api\.x\.ai$/i.test(next)) return "https://api.x.ai/v1";
+    return next;
+  }
+
+  function emptyApiProfiles() {
+    const out = {};
+    for (const p of API_PROVIDERS) {
+      out[p.id] = { apiKey: "", baseUrl: p.baseUrl, model: p.defaultModel };
+    }
+    return out;
+  }
+
+  function normalizeApiProfiles(raw, current) {
+    const out = emptyApiProfiles();
+    const src = raw && typeof raw === "object" ? raw : {};
+    for (const p of API_PROVIDERS) {
+      const row = src[p.id] && typeof src[p.id] === "object" ? src[p.id] : {};
+      out[p.id] = {
+        apiKey: typeof row.apiKey === "string" ? row.apiKey : "",
+        baseUrl: canonicalizeBaseUrl(row.baseUrl || p.baseUrl || "", p.id),
+        model: String(row.model || p.defaultModel || "").trim(),
+      };
+    }
+    const pid = inferApiProviderId(current);
+    if (current?.apiKey && !out[pid].apiKey) {
+      out[pid] = {
+        apiKey: String(current.apiKey || "").trim(),
+        baseUrl: canonicalizeBaseUrl(current.baseUrl || out[pid].baseUrl || "", pid),
+        model: String(current.model || out[pid].model || "").trim(),
+      };
+    }
+    return out;
+  }
+
+  function upsertCurrentApiProfile(settings) {
+    const pid = inferApiProviderId(settings);
+    const profiles = normalizeApiProfiles(settings?.apiProfiles, settings);
+    profiles[pid] = {
+      apiKey: String(settings?.apiKey || "").trim(),
+      baseUrl: canonicalizeBaseUrl(settings?.baseUrl, pid),
+      model: String(settings?.model || "").trim(),
+    };
+    return {
+      ...settings,
+      apiProvider: pid,
+      baseUrl: profiles[pid].baseUrl,
+      apiProfiles: profiles,
+    };
+  }
+
+  function applyProviderProfile(settings, providerId) {
+    const pid = getApiProvider(providerId).id;
+    const preset = getApiProvider(pid);
+    const profiles = normalizeApiProfiles(settings?.apiProfiles, settings);
+    const saved = profiles[pid] || {};
+    const baseUrl = canonicalizeBaseUrl(saved.baseUrl || preset.baseUrl, pid);
+    return {
+      ...settings,
+      apiProvider: pid,
+      apiKey: saved.apiKey || "",
+      baseUrl,
+      model: saved.model || preset.defaultModel,
+      apiProfiles: profiles,
+    };
+  }
+
+  function switchApiProvider(id, currentFields) {
+    let s = loadSettings();
+    if (currentFields && typeof currentFields === "object") s = { ...s, ...currentFields };
+    s = upsertCurrentApiProfile(s);
+    s = applyProviderProfile(s, id);
+    return saveSettings(s);
+  }
 
   function normalizeStructureTheme(id) {
     const ok = STRUCTURE_THEMES.some((t) => t.id === id);
@@ -247,12 +412,14 @@ const Storage = (() => {
       "seed-topic-contraction-jeon",
       "seed-adnominal-neun",
       "seed-adnominal-eun",
+      "seed-adnominal-eul",
       "seed-subject",
       "seed-deusi",
       "seed-object",
       "seed-object-contraction-nal",
       "seed-object-contraction-neol",
       "seed-object-contraction-jeol",
+      "seed-ui",
       "seed-e",
       "seed-eseo",
       "seed-go",
@@ -267,6 +434,7 @@ const Storage = (() => {
       "seed-s-irregular",
       "seed-reu-irregular",
       "seed-h-irregular",
+      "seed-l-deletion",
       "seed-eu-deletion",
       "seed-vowel-hae",
       "seed-vowel-yeo",
@@ -313,6 +481,14 @@ const Storage = (() => {
     "해체（반말）": "平語（해체）",
     "합니다體（-습니다）": "正式體（-습니다）",
     "主題助詞（은/는）": "主題（은/는）",
+    "主題（는）": "主題（은/는）",
+    "主題（은）": "主題（은/는）",
+    "主題助詞（는）": "主題（은/는）",
+    "主題助詞（은）": "主題（은/는）",
+    "主格（가）": "主格（이/가）",
+    "主格（이）": "主格（이/가）",
+    "賓格（를）": "賓格（을/를）",
+    "賓格（을）": "賓格（을/를）",
     "主格助詞（이/가）": "主格（이/가）",
     "比喻接尾（듯이）": "比喻（듯이）",
     "賓格助詞（을/를）": "賓格（을/를）",
@@ -324,6 +500,18 @@ const Storage = (() => {
     "指定詞해요體（이에요/예요）": "指定（이에요/예요）",
     "值得／還可以（-(으)ㄹ 만하다）": "值得（-ㄹ 만하다）",
     "命令／請托（-아/어 줘）": "請托（-아/어 줘）",
+    "定語助詞（의）": "所有格（의）",
+    "所有格助詞（의）": "所有格（의）",
+    "屬格助詞（의）": "所有格（의）",
+    "屬格（의）": "所有格（의）",
+    "定語格（의）": "所有格（의）",
+    "冠形格（의）": "所有格（의）",
+    "冠形格助詞（의）": "所有格（의）",
+    "無論（-든지）": "不論（-든지）",
+    "如同（듯이）": "比喻（듯이）",
+    "話題助詞（은/는）": "主題（은/는）",
+    "動詞背景對比（-는데）": "背景對比（-는데）",
+    "處所助詞（에）": "時間地點（에）",
   };
 
   function migrateRuleTitles(rules) {
@@ -340,13 +528,90 @@ const Storage = (() => {
     return { rules: next, changed };
   }
 
+  function titleDedupeKey(raw) {
+    return String(raw || "")
+      .normalize("NFKC")
+      .replace(/[（(]/g, "(")
+      .replace(/[）)]/g, ")")
+      .replace(/[／/]/g, "/")
+      .replace(/[〜～~]/g, "~")
+      .replace(/[‐‑–—−]/g, "-")
+      .replace(/[\s\u00A0\u3000\u200B-\u200D\u2060\uFEFF]+/g, "")
+      .replace(/。+$/g, "")
+      .toLowerCase();
+  }
+
+  function ruleCompletenessScore(rule) {
+    const exp = String(rule?.explanation || "").length;
+    const st = String(rule?.structure || "").length;
+    const kw = Array.isArray(rule?.keywords) ? rule.keywords.filter(Boolean).length : 0;
+    return exp * 4 + st * 3 + kw * 12;
+  }
+
+  function absorbRuleFields(winner, loser) {
+    if (!winner || !loser) return winner;
+    const next = { ...winner };
+    if (!String(next.structure || "").trim() && String(loser.structure || "").trim()) {
+      next.structure = loser.structure;
+    }
+    if (
+      (!Array.isArray(next.keywords) || !next.keywords.length) &&
+      Array.isArray(loser.keywords) &&
+      loser.keywords.length
+    ) {
+      next.keywords = loser.keywords.slice();
+    }
+    if (String(loser.explanation || "").length > String(next.explanation || "").length) {
+      next.explanation = loser.explanation;
+    }
+    return next;
+  }
+
+  function pickRicherRule(a, b) {
+    const sa = ruleCompletenessScore(a);
+    const sb = ruleCompletenessScore(b);
+    if (sa !== sb) return sa >= sb ? a : b;
+    const ua = Date.parse(a?.updated_at) || 0;
+    const ub = Date.parse(b?.updated_at) || 0;
+    if (ua !== ub) return ua >= ub ? a : b;
+    return a;
+  }
+
+  /** 同標題（含全形／空白差）只留較完整的一張 */
+  function dedupeDuplicateRules(rules) {
+    const list = Array.isArray(rules) ? rules.filter((r) => r && r.id) : [];
+    const byKey = new Map();
+    for (const r of list) {
+      const key = titleDedupeKey(r.title) || `id:${r.id}`;
+      const prev = byKey.get(key);
+      if (!prev) {
+        byKey.set(key, r);
+        continue;
+      }
+      const win = pickRicherRule(prev, r);
+      const loser = win === prev ? r : prev;
+      byKey.set(key, absorbRuleFields(win, loser));
+    }
+    const seen = new Set();
+    const out = [];
+    for (const r of list) {
+      const key = titleDedupeKey(r.title) || `id:${r.id}`;
+      const win = byKey.get(key);
+      if (!win || seen.has(win.id)) continue;
+      seen.add(win.id);
+      out.push(win);
+    }
+    const changed = out.length !== list.length || out.some((r, i) => r !== list[i]);
+    return { rules: out, changed };
+  }
+
   /** 補上本機尚未有的種子卡（例如新加的 請托、平語） */
   function ensureMissingSeedRules(rules, seedList) {
     if (!Array.isArray(rules)) return { rules: [], changed: false };
     if (!Array.isArray(seedList) || !seedList.length) return { rules, changed: false };
     const byId = new Map(rules.filter((r) => r && r.id).map((r) => [r.id, r]));
     const titles = new Set(
-      [...byId.values()].map((r) => String(r?.title || "").trim()).filter(Boolean)
+      [...byId.values()].map((r) => titleDedupeKey(r?.title)).filter(Boolean)
     );
     let changed = false;
     for (const s of seedList) {
@@ -354,13 +619,21 @@ const Storage = (() => {
       if (byId.has(s.id)) continue;
       // 使用者已自建同標題時不重複插入（例如已有 해체（반말））
       const seedTitle = String(s.title || "").trim();
-      if (seedTitle && titles.has(seedTitle)) continue;
+      const seedKey = titleDedupeKey(seedTitle);
+      if (seedKey && titles.has(seedKey)) continue;
+      // 使用者已有即將更名成此種子標題的舊卡，勿再插一張
+      if (
+        seedTitle &&
+        [...byId.values()].some((r) => TITLE_RENAMES[String(r?.title || "").trim()] === seedTitle)
+      ) {
+        continue;
+      }
       byId.set(s.id, {
         ...s,
         created_at: s.created_at || SEED_EPOCH,
         updated_at: s.updated_at || s.created_at || SEED_EPOCH,
       });
-      if (seedTitle) titles.add(seedTitle);
+      if (seedKey) titles.add(seedKey);
       changed = true;
     }
     return { rules: Array.from(byId.values()), changed };
@@ -390,6 +663,9 @@ const Storage = (() => {
       const titleMig = migrateRuleTitles(next);
       next = titleMig.rules;
       changed = titleMig.changed || changed;
+      const dedupe = dedupeDuplicateRules(next);
+      next = dedupe.rules;
+      changed = changed || dedupe.changed;
 
       const meta = getMeta();
       if (mig.changed && !meta.vowelScopeTitleV1At) {
@@ -448,6 +724,7 @@ const Storage = (() => {
         exportedAt: new Date().toISOString(),
         rules: list,
         projects: listProjects(),
+        collections: listCollections(),
       },
       null,
       2
@@ -498,6 +775,9 @@ const Storage = (() => {
     if (Array.isArray(data.rules)) {
       const rules = importRulesArray(data.rules, mode);
       let projectsResult = null;
+      if (Array.isArray(data.collections) && data.collections.length) {
+        importCollectionsList(data.collections, mode);
+      }
       if (Array.isArray(data.projects) && data.projects.length) {
         projectsResult = importProjectsList(data.projects, mode);
       }
@@ -534,17 +814,15 @@ const Storage = (() => {
   }
 
   /**
-   * 查詢模式：API 文法 / 本地文法（互斥）· API 單字（可獨立）
-   * 相容舊版 LOOKUP_MODE_KEY（api | local）
+   * 查詢模式：API 文法 · API 單字（可獨立）；本地文法排查已取消
+   * 相容舊版 LOOKUP_MODE_KEY（api | local）—— local 視為手動模式
    */
-  function normalizeLookupModes(input, opts = {}) {
+  function normalizeLookupModes(input) {
     const src = input && typeof input === "object" ? input : null;
     let apiGrammar;
-    let localGrammar;
     let apiVocab;
     if (src && ("apiGrammar" in src || "localGrammar" in src || "apiVocab" in src)) {
       apiGrammar = Boolean(src.apiGrammar);
-      localGrammar = Boolean(src.localGrammar);
       apiVocab = Boolean(src.apiVocab);
     } else {
       let legacy = "api";
@@ -556,22 +834,13 @@ const Storage = (() => {
       }
       if (legacy === "local") {
         apiGrammar = false;
-        localGrammar = true;
         apiVocab = false;
       } else {
         apiGrammar = true;
-        localGrammar = false;
         apiVocab = true;
       }
     }
-    if (opts.preferLocal) {
-      if (localGrammar) apiGrammar = false;
-    } else if (opts.preferApiGrammar) {
-      if (apiGrammar) localGrammar = false;
-    } else if (apiGrammar && localGrammar) {
-      localGrammar = false;
-    }
-    return { apiGrammar, localGrammar, apiVocab };
+    return { apiGrammar, localGrammar: false, apiVocab };
   }
 
   function loadSettings() {
@@ -596,11 +865,26 @@ const Storage = (() => {
           DEFAULT_SETTINGS.model,
         structureTheme: normalizeStructureTheme(parsed?.structureTheme),
         kiwiEnabled: parsed?.kiwiEnabled !== false,
+        apiTtsEnabled: parsed?.apiTtsEnabled === true,
       };
       base.lookupModes = normalizeLookupModes(
         parsed && typeof parsed === "object" ? parsed.lookupModes : null
       );
-      return base;
+      base.apiProfiles = normalizeApiProfiles(parsed?.apiProfiles, base);
+      base.apiProvider = inferApiProviderId(base);
+      base.baseUrl = canonicalizeBaseUrl(base.baseUrl, base.apiProvider);
+      const next = upsertCurrentApiProfile(base);
+      const oldUrl = String(parsed?.baseUrl || "").trim().replace(/\/+$/, "");
+      const oldGrok = String(parsed?.apiProfiles?.grok?.baseUrl || "")
+        .trim()
+        .replace(/\/+$/, "");
+      if (
+        oldUrl !== next.baseUrl ||
+        (oldGrok && oldGrok !== next.apiProfiles?.grok?.baseUrl)
+      ) {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+      }
+      return next;
     } catch {
       return {
         ...DEFAULT_SETTINGS,
@@ -612,10 +896,13 @@ const Storage = (() => {
   function saveSettings(partial) {
     const next = { ...loadSettings(), ...partial };
     next.apiKey = String(next.apiKey || "").trim();
-    next.baseUrl = String(next.baseUrl || DEFAULT_SETTINGS.baseUrl).trim().replace(/\/+$/, "");
     next.model = String(next.model || DEFAULT_SETTINGS.model).trim();
     next.structureTheme = normalizeStructureTheme(next.structureTheme);
     next.kiwiEnabled = next.kiwiEnabled !== false;
+    next.apiTtsEnabled = next.apiTtsEnabled === true;
+    next.apiProvider = inferApiProviderId(next);
+    next.baseUrl = canonicalizeBaseUrl(next.baseUrl, next.apiProvider);
+    Object.assign(next, upsertCurrentApiProfile(next));
     if (partial && Object.prototype.hasOwnProperty.call(partial, "lookupModes")) {
       next.lookupModes = normalizeLookupModes(partial.lookupModes);
     } else {
@@ -626,22 +913,26 @@ const Storage = (() => {
   }
 
   function clearApiKey() {
-    return saveSettings({ apiKey: "" });
+    const s = loadSettings();
+    const pid = inferApiProviderId(s);
+    const profiles = normalizeApiProfiles(s.apiProfiles, s);
+    if (profiles[pid]) profiles[pid] = { ...profiles[pid], apiKey: "" };
+    return saveSettings({ apiKey: "", apiProfiles: profiles, apiProvider: pid });
   }
 
   function hasApiKey() {
     return Boolean(loadSettings().apiKey);
   }
 
-  /** @deprecated 相容舊碼：api | local（以文法排查為準） */
+  /** @deprecated 相容舊碼：api | local（本地排查已取消，local 視為手動） */
   function loadLookupMode() {
     const m = loadLookupModes();
-    return m.localGrammar && !m.apiGrammar ? "local" : "api";
+    return m.apiGrammar || m.apiVocab ? "api" : "manual";
   }
 
   function saveLookupMode(mode) {
     if (mode === "local") {
-      return saveLookupModes({ apiGrammar: false, localGrammar: true });
+      return saveLookupModes({ apiGrammar: false, localGrammar: false, apiVocab: false });
     }
     return saveLookupModes({ apiGrammar: true, localGrammar: false, apiVocab: true });
   }
@@ -657,14 +948,10 @@ const Storage = (() => {
     const cur = loadLookupModes();
     const p = partial && typeof partial === "object" ? partial : {};
     const merged = { ...cur, ...p };
-    const opts = {};
-    if (p.localGrammar === true) opts.preferLocal = true;
-    else if (p.apiGrammar === true) opts.preferApiGrammar = true;
-    const next = normalizeLookupModes(merged, opts);
+    const next = normalizeLookupModes(merged);
     saveSettings({ lookupModes: next });
     try {
       if (next.apiGrammar) localStorage.setItem(LOOKUP_MODE_KEY, "api");
-      else if (next.localGrammar) localStorage.setItem(LOOKUP_MODE_KEY, "local");
     } catch {
       /* ignore */
     }
@@ -681,7 +968,6 @@ const Storage = (() => {
     const m = modes || loadLookupModes();
     const parts = [];
     if (m.apiGrammar) parts.push("API 文法");
-    if (m.localGrammar) parts.push("本地文法");
     if (m.apiVocab) parts.push("API 單字");
     return parts.length ? parts.join(" · ") : "未啟用";
   }
@@ -723,9 +1009,39 @@ const Storage = (() => {
           row.start = start;
           row.end = end;
         }
+        const tokenFrom = Number(it?.tokenFrom);
+        const tokenTo = Number(it?.tokenTo);
+        if (Number.isFinite(tokenFrom)) row.tokenFrom = tokenFrom;
+        if (Number.isFinite(tokenTo)) row.tokenTo = tokenTo;
+        if (it?.kiwiKind) row.kiwiKind = String(it.kiwiKind);
+        if (it?.grammarKey) row.grammarKey = String(it.grammarKey);
+        if (it?.candidateId) row.candidateId = String(it.candidateId);
         return row;
       })
       .filter((it) => it.name);
+  }
+
+  /** 形態素切詞快照（hover／分析板／重看用） */
+  function slimTokens(tokens) {
+    if (typeof KoParse !== "undefined" && KoParse.slimTokens) {
+      return KoParse.slimTokens(tokens);
+    }
+    return (Array.isArray(tokens) ? tokens : [])
+      .slice(0, 240)
+      .map((t) => ({
+        word: String(t?.word ?? ""),
+        form: String(t?.form || "").trim(),
+        pos: String(t?.pos || "").trim(),
+        tag: String(t?.tag || "").trim(),
+        lemma: String(t?.lemma || "").trim(),
+        start: Number.isFinite(t?.start) ? t.start : t?.start == null ? null : Number(t.start),
+        end: Number.isFinite(t?.end) ? t.end : t?.end == null ? null : Number(t.end),
+        length: Number.isFinite(t?.length) ? t.length : 0,
+        zeroWidth: Boolean(t?.zeroWidth),
+        kiwiPosition: Number.isFinite(t?.kiwiPosition) ? t.kiwiPosition : null,
+        wordPosition: Number.isFinite(t?.wordPosition) ? t.wordPosition : null,
+      }))
+      .filter((t) => t.word || t.form);
   }
 
   /** 詞彙原形快照（hover 用） */
@@ -749,6 +1065,158 @@ const Storage = (() => {
     return String(s || "")
       .trim()
       .normalize("NFC");
+  }
+
+  const LATIN_WORD_RE = /[A-Za-z]+(?:['’][A-Za-z]+)*/g;
+  const KO_SCRIPT_RE = /[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF]/;
+
+  /** 歌詞夾雜的英文（拉丁字母、無韓文）— 不查 API、不收入單字庫 */
+  function isEnglishVocabSkip(surface, lemma) {
+    for (const raw of [surface, lemma]) {
+      const s = String(raw || "").trim();
+      if (!s) continue;
+      if (KO_SCRIPT_RE.test(s)) continue;
+      if (/[A-Za-z]/.test(s)) return true;
+    }
+    return false;
+  }
+
+  function filterEnglishVocab(list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter((w) => !isEnglishVocabSkip(w?.surface, w?.lemma));
+  }
+
+  /** 人稱代詞：나↔내（나의）、너↔네、저↔제。單音節，API／詞庫常漏。 */
+  const PRONOUN_ENTRIES = [
+    { form: "저희", lemma: "저희", gloss: "我們（謙稱）", pos: "代詞" },
+    { form: "우리", lemma: "우리", gloss: "我們", pos: "代詞" },
+    { form: "나", lemma: "나", gloss: "我", pos: "代詞" },
+    { form: "너", lemma: "너", gloss: "你", pos: "代詞" },
+    { form: "저", lemma: "저", gloss: "我（謙稱）", pos: "代詞" },
+    { form: "내", lemma: "나", gloss: "我的（나）", pos: "代詞" },
+    { form: "네", lemma: "너", gloss: "你的（너）", pos: "代詞" },
+    { form: "제", lemma: "저", gloss: "我的（謙稱）", pos: "代詞" },
+  ];
+  const PRONOUN_FORM_SET = new Set(PRONOUN_ENTRIES.map((p) => p.form));
+  const PRONOUN_LEMMA_ALTS = {
+    나: ["내", "내가"],
+    너: ["네", "네가", "니가"],
+    저: ["제", "제가"],
+    내: ["나"],
+    네: ["너"],
+    제: ["저"],
+  };
+  const PRONOUN_PARTICLE_TAIL =
+    /^(는|은|를|을|가|이|의|와|과|도|만|요|죠|께|한테|에게|에서|으로|로|부터|까지)?$/;
+
+  function isHangulSyllableCh(ch) {
+    const c = String(ch || "").charCodeAt(0);
+    return c >= 0xac00 && c <= 0xd7a3;
+  }
+
+  function pronounAlts(key) {
+    const k = String(key || "").trim();
+    const extra = PRONOUN_LEMMA_ALTS[k] || [];
+    return [k, ...extra].filter(Boolean);
+  }
+
+  function findPronounLocs(text) {
+    const src = String(text || "").normalize("NFC");
+    const hits = [];
+    const seen = new Set();
+    let i = 0;
+    while (i < src.length) {
+      if (!isHangulSyllableCh(src[i])) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < src.length && isHangulSyllableCh(src[j])) j++;
+      const run = src.slice(i, j);
+      for (const p of PRONOUN_ENTRIES) {
+        if (run === p.form) {
+          const key = `${i}-${i + p.form.length}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            hits.push({
+              start: i,
+              end: i + p.form.length,
+              surface: p.form,
+              lemma: p.lemma,
+              gloss: p.gloss,
+              pos: p.pos,
+            });
+          }
+          break;
+        }
+        if (run.startsWith(p.form) && PRONOUN_PARTICLE_TAIL.test(run.slice(p.form.length))) {
+          const key = `${i}-${i + p.form.length}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            hits.push({
+              start: i,
+              end: i + p.form.length,
+              surface: p.form,
+              lemma: p.lemma,
+              gloss: p.lemma === p.form ? p.gloss : p.gloss,
+              pos: p.pos,
+            });
+          }
+          break;
+        }
+      }
+      i = j;
+    }
+    return hits;
+  }
+
+  function ensurePronounVocab(query, vocabList) {
+    const src = String(query || "");
+    const list = Array.isArray(vocabList) ? vocabList.slice() : [];
+    const locs = findPronounLocs(src);
+    if (!locs.length) return list;
+
+    function alreadyCovers(loc) {
+      return list.some((w) => {
+        const a = Number(w.start);
+        const b = Number(w.end);
+        if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+          return !(loc.end <= a || loc.start >= b);
+        }
+        const surf = String(w.surface || "").trim();
+        const lem = String(w.lemma || "").trim();
+        if (surf === loc.surface || lem === loc.lemma || surf === loc.lemma || lem === loc.surface) {
+          return src.includes(surf) || src.includes(lem);
+        }
+        return pronounAlts(lem).includes(loc.surface) || pronounAlts(surf).includes(loc.surface);
+      });
+    }
+
+    for (const loc of locs) {
+      if (alreadyCovers(loc)) continue;
+      list.push({
+        surface: loc.surface,
+        lemma: loc.lemma,
+        gloss: loc.gloss,
+        pos: loc.pos,
+        start: loc.start,
+        end: loc.end,
+        source: "pronoun-hint",
+      });
+    }
+    return list;
+  }
+
+  function stripEnglishFromVocabQuery(query) {
+    return String(query || "")
+      .replace(LATIN_WORD_RE, " ")
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function vocabQueryHasTargetLanguage(query) {
+    return KO_SCRIPT_RE.test(String(query || ""));
   }
 
   const SENSE_KEYS = VOCAB_BANK_FIELDS.filter((k) => k !== "surface");
@@ -950,6 +1418,7 @@ const Storage = (() => {
     const now = new Date().toISOString();
     let n = 0;
     for (const w of Array.isArray(list) ? list : []) {
+      if (isEnglishVocabSkip(w?.surface, w?.lemma)) continue;
       const surface = normVocabBankKey(w?.surface || w?.lemma);
       if (!surface) continue;
       const surfaceDisp = String(w?.surface || w?.lemma || surface).trim();
@@ -1025,7 +1494,7 @@ const Storage = (() => {
     if (!bank.byLemma || !Object.keys(bank.byLemma).length) rebuildLemmaIndex(bank);
     const bySurface = bank.bySurface || {};
     const src = String(queryText || "");
-    const list = Array.isArray(vocabList) ? vocabList.slice() : [];
+    const list = filterEnglishVocab(Array.isArray(vocabList) ? vocabList : []);
     const seen = new Set();
 
     function enrich(row) {
@@ -1038,16 +1507,25 @@ const Storage = (() => {
     const out = list.map(enrich);
     if (src) {
       const keys = Object.keys(bySurface)
-        .filter((k) => k.length >= 2 && src.includes(k) && !seen.has(k))
+        .filter((k) => {
+          if (seen.has(k)) return false;
+          if (k.length >= 2) return src.includes(k);
+          if (!PRONOUN_FORM_SET.has(k)) return false;
+          return pronounAlts(k).some((a) => src.includes(a));
+        })
         .sort((a, b) => b.length - a.length || a.localeCompare(b));
       let added = 0;
       for (const k of keys) {
         if (added >= 40) break;
+        if (isEnglishVocabSkip(k)) continue;
         const hit = bySurface[k];
         if (!hit || !vocabBankHasPayload(hit)) continue;
         const flat = flattenBankHit(hit) || hit;
+        const surfaceInSrc = src.includes(k)
+          ? k
+          : pronounAlts(k).find((a) => a !== k && src.includes(a)) || hit.surface || k;
         out.push({
-          surface: hit.surface || k,
+          surface: surfaceInSrc,
           lemma: flat.lemma || "",
           gloss: flat.gloss || "",
           pos: flat.pos || "",
@@ -1066,6 +1544,7 @@ const Storage = (() => {
       if (hintAdded >= 40) break;
       const surf = String(t?.surface || "").trim();
       if (!surf) continue;
+      if (isEnglishVocabSkip(surf, t?.lemma)) continue;
       const sk = normVocabBankKey(surf);
       if (sk && seen.has(sk)) continue;
       const hit = findVocabBankHit(bank, surf, t?.lemma);
@@ -1224,11 +1703,20 @@ const Storage = (() => {
    * 新增或更新查詢歷史（同句移到最前）
    * @param {{ query: string, summary?: string, translation?: string, ownedCount?: number, missingCount?: number, items?: object[], vocab?: object[] }} entry
    */
+  function mergeKeptTranslation(prev, incoming, replace) {
+    if (replace) return String(incoming || "").trim();
+    const old = String(prev || "").trim();
+    if (old) return old;
+    return String(incoming || "").trim();
+  }
+
   function addHistoryEntry(entry) {
     const q = String(entry?.query || "").trim();
     if (!q) return loadHistory();
     const norm = q.replace(/\s+/g, " ");
-    let list = loadHistory().filter(
+    const prevList = loadHistory();
+    const prev = prevList.find((h) => String(h.query || "").replace(/\s+/g, " ") === norm);
+    let list = prevList.filter(
       (h) => String(h.query || "").replace(/\s+/g, " ") !== norm
     );
     const item = {
@@ -1238,12 +1726,25 @@ const Storage = (() => {
       query: q,
       at: new Date().toISOString(),
       summary: String(entry.summary || "").trim(),
-      translation: String(entry.translation || "").trim(),
+      translation: mergeKeptTranslation(prev?.translation, entry.translation, entry.replaceTranslation),
       ownedCount: Number.isFinite(entry.ownedCount) ? entry.ownedCount : null,
       missingCount: Number.isFinite(entry.missingCount) ? entry.missingCount : null,
       // 完整盤點快照：之後「依現在筆記本重看」可不呼叫 API 重新分類
       items: slimInventoryItems(entry.items),
-      vocab: slimVocabItems(entry.vocab),
+      vocab: (() => {
+        const incomingVocab = slimVocabItems(entry.vocab);
+        if (incomingVocab.length || !Array.isArray(prev?.vocab) || !prev.vocab.length) {
+          return incomingVocab;
+        }
+        return slimVocabItems(prev.vocab);
+      })(),
+      tokens: (() => {
+        const incoming = slimTokens(entry.tokens);
+        if (incoming.length || !Array.isArray(prev?.tokens) || !prev.tokens.length) {
+          return incoming;
+        }
+        return slimTokens(prev.tokens);
+      })(),
     };
     list.unshift(item);
     if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX);
@@ -1277,51 +1778,472 @@ const Storage = (() => {
       .replace(/\s+/g, " ");
   }
 
-  function loadProjectsStore() {
+  /* 大項 collections 只做容器；句子只存在分項 project */
+  const UNGROUPED_COLLECTION_ID = "";
+
+  function normalizeCollection(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const id = String(raw.id || "").trim();
+    if (!id) return null;
+    return {
+      id,
+      name: String(raw.name || "未命名").trim() || "未命名",
+      createdAt: raw.createdAt || new Date().toISOString(),
+      updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
+      lastProjectId: String(raw.lastProjectId || "").trim(),
+    };
+  }
+
+  function normalizeProjectRecord(p, i = 0) {
+    if (!p || !p.id) return null;
+    return {
+      id: String(p.id),
+      name: String(p.name || "未命名專案").trim() || "未命名專案",
+      collectionId: String(p.collectionId || UNGROUPED_COLLECTION_ID).trim(),
+      createdAt: p.createdAt || new Date().toISOString(),
+      updatedAt: p.updatedAt || p.createdAt || new Date().toISOString(),
+      entries: Array.isArray(p.entries)
+        ? p.entries
+            .filter((e) => e && e.query)
+            .map((e, ei) => ({
+              id: String(e.id || newId("pe_")),
+              seq: Number.isFinite(Number(e.seq)) ? Number(e.seq) : ei + 1,
+              query: String(e.query || "").trim(),
+              at: e.at || new Date().toISOString(),
+              summary: String(e.summary || "").trim(),
+              translation: String(e.translation || "").trim(),
+              ownedCount: Number.isFinite(e.ownedCount) ? e.ownedCount : null,
+              missingCount: Number.isFinite(e.missingCount) ? e.missingCount : null,
+              items: slimInventoryItems(e.items),
+              vocab: slimVocabItems(e.vocab),
+              tokens: slimTokens(e.tokens),
+            }))
+        : [],
+    };
+  }
+
+  /** 記憶體快取：讀寫同步；IndexedDB 非同步落盤 */
+  let projectsCache = null;
+  let projectsBackend = "localStorage";
+  let projectsDb = null;
+  let projectsDirty = false;
+  let projectsFlushTimer = null;
+  let projectsFlushPromise = null;
+  let projectsInitPromise = null;
+
+  function emptyProjectsStore() {
+    return { collections: [], projects: [] };
+  }
+
+  function isProjectsIdbStub(parsed) {
+    return Boolean(parsed && typeof parsed === "object" && parsed.__idb === true);
+  }
+
+  function storePayloadCount(store) {
+    return (store?.projects?.length || 0) + (store?.collections?.length || 0);
+  }
+
+  function normalizeProjectsStoreObject(parsed) {
+    if (!parsed || typeof parsed !== "object" || isProjectsIdbStub(parsed)) {
+      return emptyProjectsStore();
+    }
+    const projectsRaw = Array.isArray(parsed.projects)
+      ? parsed.projects
+      : Array.isArray(parsed)
+        ? parsed
+        : [];
+    const collections = (Array.isArray(parsed.collections) ? parsed.collections : [])
+      .map((c) => normalizeCollection(c))
+      .filter(Boolean);
+    const colIds = new Set(collections.map((c) => c.id));
+    const projects = projectsRaw
+      .map((p, i) => normalizeProjectRecord(p, i))
+      .filter(Boolean)
+      .map((p) => {
+        if (p.collectionId && !colIds.has(p.collectionId)) p.collectionId = UNGROUPED_COLLECTION_ID;
+        return p;
+      });
+    for (const c of collections) {
+      if (c.lastProjectId && !projects.some((x) => x.id === c.lastProjectId)) {
+        c.lastProjectId = "";
+      }
+    }
+    return { collections, projects };
+  }
+
+  function readProjectsLocalStorageRaw() {
     try {
-      const raw = localStorage.getItem(PROJECTS_KEY);
-      if (!raw) return { projects: [] };
-      const parsed = JSON.parse(raw);
-      const projects = Array.isArray(parsed?.projects)
-        ? parsed.projects
-        : Array.isArray(parsed)
-          ? parsed
-          : [];
-      return {
-        projects: projects
-          .filter((p) => p && p.id)
-          .map((p) => ({
-            id: String(p.id),
-            name: String(p.name || "未命名專案").trim() || "未命名專案",
-            createdAt: p.createdAt || new Date().toISOString(),
-            updatedAt: p.updatedAt || p.createdAt || new Date().toISOString(),
-            entries: Array.isArray(p.entries)
-              ? p.entries
-                  .filter((e) => e && e.query)
-                  .map((e, i) => ({
-                    id: String(e.id || newId("pe_")),
-                    seq: Number.isFinite(Number(e.seq)) ? Number(e.seq) : i + 1,
-                    query: String(e.query || "").trim(),
-                    at: e.at || new Date().toISOString(),
-                    summary: String(e.summary || "").trim(),
-                    translation: String(e.translation || "").trim(),
-                    ownedCount: Number.isFinite(e.ownedCount) ? e.ownedCount : null,
-                    missingCount: Number.isFinite(e.missingCount) ? e.missingCount : null,
-                    items: slimInventoryItems(e.items),
-                    vocab: slimVocabItems(e.vocab),
-                  }))
-              : [],
-          })),
-      };
+      return localStorage.getItem(PROJECTS_KEY);
     } catch {
-      return { projects: [] };
+      return null;
     }
   }
 
+  function parseProjectsLocalStorage() {
+    const raw = readProjectsLocalStorageRaw();
+    if (!raw) return { store: emptyProjectsStore(), stub: false, missing: true };
+    try {
+      const parsed = JSON.parse(raw);
+      if (isProjectsIdbStub(parsed)) {
+        return { store: emptyProjectsStore(), stub: true, missing: false };
+      }
+      return { store: normalizeProjectsStoreObject(parsed), stub: false, missing: false };
+    } catch {
+      return { store: emptyProjectsStore(), stub: false, missing: false };
+    }
+  }
+
+  function quotaError(err) {
+    const msg = String(err && (err.name + " " + err.message));
+    if (/quota|QuotaExceeded/i.test(msg)) {
+      return new Error("瀏覽器儲存空間不足，無法再寫入專案句子");
+    }
+    return null;
+  }
+
+  function writeProjectsLocalStorageFull(store) {
+    localStorage.setItem(
+      PROJECTS_KEY,
+      JSON.stringify({
+        collections: Array.isArray(store?.collections) ? store.collections : [],
+        projects: Array.isArray(store?.projects) ? store.projects : [],
+      })
+    );
+  }
+
+  function writeProjectsLocalStorageStub() {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify({ __idb: true }));
+  }
+
+  function idbAvailable() {
+    return typeof indexedDB !== "undefined";
+  }
+
+  function openProjectsDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error("IndexedDB 無法開啟"));
+    });
+  }
+
+  function idbGet(db, key) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbPut(db, key, value) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error("IndexedDB 寫入中止"));
+      tx.onerror = () => reject(tx.error || new Error("IndexedDB 寫入失敗"));
+      tx.objectStore(IDB_STORE).put(value, key);
+    });
+  }
+
+  function adoptProjectsCache(store) {
+    projectsCache = {
+      collections: Array.isArray(store?.collections) ? store.collections : [],
+      projects: Array.isArray(store?.projects) ? store.projects : [],
+    };
+    return projectsCache;
+  }
+
+  async function initProjectsDb() {
+    if (projectsInitPromise) return projectsInitPromise;
+    projectsInitPromise = (async () => {
+      const fromLs = parseProjectsLocalStorage();
+      if (!idbAvailable()) {
+        adoptProjectsCache(fromLs.store);
+        projectsBackend = "localStorage";
+        return { backend: projectsBackend };
+      }
+      try {
+        projectsDb = await openProjectsDb();
+        const idbVal = await idbGet(projectsDb, IDB_PROJECTS_KEY);
+        const fromIdb =
+          idbVal && typeof idbVal === "object"
+            ? normalizeProjectsStoreObject(idbVal)
+            : null;
+        const idbHas = fromIdb && storePayloadCount(fromIdb) > 0;
+        const lsHas = !fromLs.stub && storePayloadCount(fromLs.store) > 0;
+        const idbRecordExists = idbVal != null;
+
+        if (idbHas || (idbRecordExists && !lsHas)) {
+          adoptProjectsCache(fromIdb || emptyProjectsStore());
+          projectsBackend = "idb";
+          projectsDirty = false;
+          try {
+            writeProjectsLocalStorageStub();
+          } catch {
+            /* 騰出 localStorage；失敗不影響 IndexedDB */
+          }
+          return { backend: "idb", migrated: false };
+        }
+
+        adoptProjectsCache(lsHas ? fromLs.store : emptyProjectsStore());
+        await idbPut(projectsDb, IDB_PROJECTS_KEY, projectsCache);
+        projectsBackend = "idb";
+        projectsDirty = false;
+        try {
+          writeProjectsLocalStorageStub();
+        } catch {
+          /* 騰出 localStorage；失敗不影響 IndexedDB */
+        }
+        return { backend: "idb", migrated: lsHas };
+      } catch (err) {
+        console.warn("[projects idb init]", err);
+        if (!projectsCache) {
+          adoptProjectsCache(fromLs.stub ? emptyProjectsStore() : fromLs.store);
+        }
+        projectsBackend = "localStorage";
+        try {
+          if (projectsCache && storePayloadCount(projectsCache)) {
+            writeProjectsLocalStorageFull(projectsCache);
+          }
+        } catch {
+          /* 記憶體仍可讀；下次再開 IndexedDB */
+        }
+        return { backend: "localStorage", error: String(err && err.message) };
+      }
+    })();
+    return projectsInitPromise;
+  }
+
+  function loadProjectsStore() {
+    if (projectsCache) return projectsCache;
+    const fromLs = parseProjectsLocalStorage();
+    return adoptProjectsCache(fromLs.store);
+  }
+
   function saveProjectsStore(store) {
-    const projects = Array.isArray(store?.projects) ? store.projects : [];
-    localStorage.setItem(PROJECTS_KEY, JSON.stringify({ projects }));
-    return { projects };
+    const next = adoptProjectsCache({
+      collections: Array.isArray(store?.collections) ? store.collections : [],
+      projects: Array.isArray(store?.projects) ? store.projects : [],
+    });
+    projectsDirty = true;
+    if (projectsBackend === "idb") {
+      scheduleProjectsFlush();
+      return next;
+    }
+    try {
+      writeProjectsLocalStorageFull(next);
+      projectsDirty = false;
+    } catch (err) {
+      const q = quotaError(err);
+      if (q) throw q;
+      throw err;
+    }
+    return next;
+  }
+
+  function scheduleProjectsFlush() {
+    if (projectsFlushTimer || projectsFlushPromise) return;
+    projectsFlushTimer = setTimeout(() => {
+      projectsFlushTimer = null;
+      flushProjects();
+    }, 0);
+  }
+
+  async function runProjectsFlush() {
+    while (projectsDirty) {
+      projectsDirty = false;
+      const snapshot = projectsCache || emptyProjectsStore();
+      try {
+        if (projectsBackend === "idb" && projectsDb) {
+          await idbPut(projectsDb, IDB_PROJECTS_KEY, snapshot);
+        } else {
+          writeProjectsLocalStorageFull(snapshot);
+        }
+      } catch (err) {
+        if (projectsBackend === "idb") {
+          try {
+            writeProjectsLocalStorageFull(snapshot);
+            projectsBackend = "localStorage";
+            console.warn("[projects idb] 改回 localStorage", err);
+          } catch (err2) {
+            projectsDirty = true;
+            const q = quotaError(err2);
+            throw q || err2;
+          }
+        } else {
+          projectsDirty = true;
+          const q = quotaError(err);
+          throw q || err;
+        }
+      }
+    }
+  }
+
+  function flushProjects() {
+    if (projectsFlushTimer) {
+      clearTimeout(projectsFlushTimer);
+      projectsFlushTimer = null;
+    }
+    if (projectsFlushPromise) return projectsFlushPromise;
+    if (!projectsDirty) return Promise.resolve();
+    projectsFlushPromise = runProjectsFlush().finally(() => {
+      projectsFlushPromise = null;
+      if (projectsDirty) scheduleProjectsFlush();
+    });
+    return projectsFlushPromise;
+  }
+
+  function getProjectsBackend() {
+    return projectsBackend;
+  }
+
+  function estimateProjectsCacheBytes() {
+    if (!projectsCache) return 0;
+    try {
+      return JSON.stringify(projectsCache).length * 2;
+    } catch {
+      return 0;
+    }
+  }
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushProjects();
+    });
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", () => {
+      flushProjects();
+    });
+  }
+
+  function touchCollectionInStore(store, collectionId, patch = {}) {
+    if (!collectionId) return;
+    const c = store.collections.find((x) => x.id === collectionId);
+    if (!c) return;
+    c.updatedAt = new Date().toISOString();
+    if (patch.lastProjectId !== undefined) c.lastProjectId = String(patch.lastProjectId || "");
+  }
+
+  function listCollections() {
+    const { collections } = loadProjectsStore();
+    return collections
+      .slice()
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  }
+
+  function getCollection(id) {
+    if (!id) return null;
+    return loadProjectsStore().collections.find((c) => c.id === id) || null;
+  }
+
+  function createCollection(name) {
+    const n = String(name || "").trim() || "未命名";
+    const store = loadProjectsStore();
+    const now = new Date().toISOString();
+    const collection = {
+      id: newId("col_"),
+      name: n,
+      createdAt: now,
+      updatedAt: now,
+      lastProjectId: "",
+    };
+    store.collections.push(collection);
+    saveProjectsStore(store);
+    return collection;
+  }
+
+  function renameCollection(id, name) {
+    const store = loadProjectsStore();
+    const c = store.collections.find((x) => x.id === id);
+    if (!c) return null;
+    const n = String(name || "").trim();
+    if (!n) return c;
+    c.name = n;
+    c.updatedAt = new Date().toISOString();
+    saveProjectsStore(store);
+    return c;
+  }
+
+  /**
+   * @param {string} id
+   * @param {{ deleteChildren?: boolean }} [opts]
+   *   deleteChildren true：連分項刪除；false：分項回到未分類
+   */
+  function deleteCollection(id, opts = {}) {
+    const store = loadProjectsStore();
+    const exists = store.collections.some((c) => c.id === id);
+    if (!exists) return store;
+    const deleteChildren = Boolean(opts.deleteChildren);
+    if (deleteChildren) {
+      const gone = new Set(
+        store.projects.filter((p) => p.collectionId === id).map((p) => p.id)
+      );
+      store.projects = store.projects.filter((p) => p.collectionId !== id);
+      if (gone.has(getActiveProjectId())) setActiveProjectId(null);
+    } else {
+      for (const p of store.projects) {
+        if (p.collectionId === id) p.collectionId = UNGROUPED_COLLECTION_ID;
+      }
+    }
+    store.collections = store.collections.filter((c) => c.id !== id);
+    saveProjectsStore(store);
+    return store;
+  }
+
+  function listProjectsByCollection(collectionId) {
+    const cid = String(collectionId || UNGROUPED_COLLECTION_ID);
+    return listProjects().filter((p) => String(p.collectionId || "") === cid);
+  }
+
+  function countUngroupedProjects() {
+    return listProjectsByCollection(UNGROUPED_COLLECTION_ID).length;
+  }
+
+  function summarizeCollection(collectionId) {
+    const cid = String(collectionId || UNGROUPED_COLLECTION_ID);
+    const projects = listProjectsByCollection(cid);
+    const sentenceCount = projects.reduce((n, p) => n + (p.entries || []).length, 0);
+    const col = cid ? getCollection(cid) : null;
+    const last = col?.lastProjectId ? getProject(col.lastProjectId) : projects[0] || null;
+    return {
+      projectCount: projects.length,
+      sentenceCount,
+      lastProjectId: last?.id || "",
+      lastProjectName: last?.name || "",
+      updatedAt: col?.updatedAt || projects[0]?.updatedAt || "",
+    };
+  }
+
+  function rememberCollectionLastProject(collectionId, projectId) {
+    if (!collectionId || !projectId) return null;
+    const store = loadProjectsStore();
+    touchCollectionInStore(store, collectionId, { lastProjectId: projectId });
+    saveProjectsStore(store);
+    return getCollection(collectionId);
+  }
+
+  function moveProject(projectId, collectionId) {
+    const store = loadProjectsStore();
+    const p = store.projects.find((x) => x.id === projectId);
+    if (!p) return null;
+    const nextId = String(collectionId || UNGROUPED_COLLECTION_ID);
+    if (nextId && !store.collections.some((c) => c.id === nextId)) return p;
+    const prevId = String(p.collectionId || "");
+    if (prevId === nextId) return getProject(projectId);
+    p.collectionId = nextId;
+    p.updatedAt = new Date().toISOString();
+    touchCollectionInStore(store, prevId);
+    touchCollectionInStore(store, nextId, { lastProjectId: p.id });
+    saveProjectsStore(store);
+    return getProject(projectId);
   }
 
   function listProjects() {
@@ -1336,25 +2258,37 @@ const Storage = (() => {
     return loadProjectsStore().projects.find((p) => p.id === id) || null;
   }
 
-  function createProject(name) {
+  function createProject(name, opts = {}) {
     const n = String(name || "").trim() || "未命名專案";
     const store = loadProjectsStore();
     const now = new Date().toISOString();
+    let collectionId = String(opts.collectionId || UNGROUPED_COLLECTION_ID);
+    if (collectionId && !store.collections.some((c) => c.id === collectionId)) {
+      collectionId = UNGROUPED_COLLECTION_ID;
+    }
     const project = {
       id: newId("proj_"),
       name: n,
+      collectionId,
       createdAt: now,
       updatedAt: now,
       entries: [],
     };
     store.projects.push(project);
+    touchCollectionInStore(store, collectionId, { lastProjectId: project.id });
     saveProjectsStore(store);
     return project;
   }
 
   function deleteProject(id) {
     const store = loadProjectsStore();
+    const doomed = store.projects.find((p) => p.id === id);
     store.projects = store.projects.filter((p) => p.id !== id);
+    if (doomed?.collectionId) {
+      const col = store.collections.find((c) => c.id === doomed.collectionId);
+      if (col && col.lastProjectId === id) col.lastProjectId = "";
+      touchCollectionInStore(store, doomed.collectionId);
+    }
     saveProjectsStore(store);
     if (getActiveProjectId() === id) setActiveProjectId(null);
     return store.projects;
@@ -1368,6 +2302,7 @@ const Storage = (() => {
     if (!n) return p;
     p.name = n;
     p.updatedAt = new Date().toISOString();
+    touchCollectionInStore(store, p.collectionId);
     saveProjectsStore(store);
     return p;
   }
@@ -1410,38 +2345,70 @@ const Storage = (() => {
 
   /**
    * 查詢成功後寫入專案：
-   * - 同句（空白正規化後相同）已存在 → 更新快照，序號不變
+   * - forceNew：即使同句已存在也新增一筆（批量副歌各自佔號）
+   * - 有 id／seq：更新該筆，序號不變
+   * - 否則同句（空白正規化後相同）已存在 → 更新快照，序號不變
    * - 新句 → append，序號 = max(seq)+1（永久固定）
-   * 不寫入一般歷史。
+   * 回傳寫入的那一筆；不寫入一般歷史。
    */
+  function pickExistingProjectEntry(entries, entry) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (entry?.forceNew) return null;
+    if (entry?.id) {
+      const byId = list.find((e) => e.id === entry.id);
+      if (byId) return byId;
+    }
+    const seq = Number(entry?.seq);
+    if (Number.isFinite(seq) && seq > 0) {
+      const bySeq = list.find((e) => Number(e.seq) === seq);
+      if (bySeq) return bySeq;
+    }
+    const norm = normalizeQueryKey(entry?.query);
+    if (!norm) return null;
+    return list.find((e) => normalizeQueryKey(e.query) === norm) || null;
+  }
+
   function upsertProjectEntry(projectId, entry) {
     const store = loadProjectsStore();
     const p = store.projects.find((x) => x.id === projectId);
     if (!p) return null;
     const q = String(entry?.query || "").trim();
-    if (!q) return p;
-    const norm = normalizeQueryKey(q);
+    if (!q) return null;
     const now = new Date().toISOString();
-    const existing = (p.entries || []).find(
-      (e) => normalizeQueryKey(e.query) === norm
-    );
+    const existing = pickExistingProjectEntry(p.entries, entry);
+    let written;
     if (existing) {
       existing.query = q;
       existing.at = now;
       existing.summary = String(entry.summary || "").trim();
-      existing.translation = String(entry.translation || "").trim();
+      existing.translation = mergeKeptTranslation(
+        existing.translation,
+        entry.translation,
+        entry.replaceTranslation
+      );
       existing.ownedCount = Number.isFinite(entry.ownedCount) ? entry.ownedCount : null;
       existing.missingCount = Number.isFinite(entry.missingCount) ? entry.missingCount : null;
       existing.items = slimInventoryItems(entry.items);
-      existing.vocab = slimVocabItems(entry.vocab);
-      // seq 永久不變
+      {
+        const incomingVocab = slimVocabItems(entry.vocab);
+        if (incomingVocab.length || !Array.isArray(existing.vocab) || !existing.vocab.length) {
+          existing.vocab = incomingVocab;
+        }
+      }
+      {
+        const incomingTok = slimTokens(entry.tokens);
+        if (incomingTok.length || !Array.isArray(existing.tokens) || !existing.tokens.length) {
+          existing.tokens = incomingTok;
+        }
+      }
+      written = existing;
     } else {
       const maxSeq = (p.entries || []).reduce(
         (m, e) => Math.max(m, Number(e.seq) || 0),
         0
       );
       p.entries = p.entries || [];
-      p.entries.push({
+      written = {
         id: newId("pe_"),
         seq: maxSeq + 1,
         query: q,
@@ -1452,11 +2419,55 @@ const Storage = (() => {
         missingCount: Number.isFinite(entry.missingCount) ? entry.missingCount : null,
         items: slimInventoryItems(entry.items),
         vocab: slimVocabItems(entry.vocab),
-      });
+        tokens: slimTokens(entry.tokens),
+      };
+      p.entries.push(written);
     }
     p.updatedAt = now;
+    touchCollectionInStore(store, p.collectionId);
     saveProjectsStore(store);
-    return getProject(projectId);
+    return written;
+  }
+
+  function snapshotLooksReusable(entry) {
+    if (!entry) return false;
+    if (String(entry.mode || entry.source || "") === "failed") return false;
+    if (/分析失敗/.test(String(entry.summary || ""))) return false;
+    if (Array.isArray(entry.items) && entry.items.length) return true;
+    if (Array.isArray(entry.vocab) && entry.vocab.length) return true;
+    if (Array.isArray(entry.tokens) && entry.tokens.length) return true;
+    if (String(entry.translation || "").trim()) return true;
+    const sum = String(entry.summary || "").trim();
+    return Boolean(sum) && sum !== "手動模式";
+  }
+
+  /** 其他專案／歷史已查過的同句快照，供批量重複句沿用（不重打 API） */
+  function findReusableSnapshotByQuery(query, opts = {}) {
+    const norm = normalizeQueryKey(query);
+    if (!norm) return null;
+    const preferId = String(opts.projectId || "");
+    const projects = listProjects();
+    const ordered = preferId
+      ? projects.filter((p) => p.id === preferId).concat(projects.filter((p) => p.id !== preferId))
+      : projects;
+    for (const p of ordered) {
+      const entries = p.entries || [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (normalizeQueryKey(e.query) !== norm) continue;
+        if (!snapshotLooksReusable(e)) continue;
+        return e;
+      }
+    }
+    try {
+      const hist = loadHistory();
+      for (const h of hist || []) {
+        if (normalizeQueryKey(h?.query) === norm && snapshotLooksReusable(h)) return h;
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
   }
 
   function removeProjectEntry(projectId, entryId) {
@@ -1465,6 +2476,7 @@ const Storage = (() => {
     if (!p) return null;
     p.entries = (p.entries || []).filter((e) => e.id !== entryId);
     p.updatedAt = new Date().toISOString();
+    touchCollectionInStore(store, p.collectionId);
     saveProjectsStore(store);
     return getProject(projectId);
   }
@@ -1490,8 +2502,9 @@ const Storage = (() => {
     return JSON.stringify(
       {
         type: "mal-korean-grammar-projects",
-        version: 1,
+        version: 2,
         exportedAt: new Date().toISOString(),
+        collections: listCollections(),
         projects,
       },
       null,
@@ -1503,6 +2516,24 @@ const Storage = (() => {
    * 匯入專案 JSON（合併：同 id 覆蓋；無 id 則新建）
    * 接受 { projects: [...] } 或單一 project 物件或 project 陣列
    */
+  function importCollectionsList(incoming, mode = "merge") {
+    const list = Array.isArray(incoming) ? incoming : [];
+    const store = loadProjectsStore();
+    let byId = new Map(store.collections.map((c) => [c.id, c]));
+    if (mode === "replace") byId = new Map();
+    for (const raw of list) {
+      const col = normalizeCollection({
+        ...raw,
+        id: raw?.id || newId("col_"),
+      });
+      if (!col) continue;
+      byId.set(col.id, col);
+    }
+    store.collections = Array.from(byId.values());
+    saveProjectsStore(store);
+    return store.collections;
+  }
+
   function importProjectsList(incoming, mode = "merge") {
     const list = Array.isArray(incoming) ? incoming : [];
     const store = loadProjectsStore();
@@ -1510,32 +2541,18 @@ const Storage = (() => {
     if (mode === "replace") byId = new Map();
     let added = 0;
     let updated = 0;
+    const colIds = new Set(store.collections.map((c) => c.id));
     for (const raw of list) {
       if (!raw || typeof raw !== "object") continue;
       const id = String(raw.id || newId("proj_"));
-      const entries = Array.isArray(raw.entries)
-        ? raw.entries
-            .filter((e) => e && e.query)
-            .map((e, i) => ({
-              id: String(e.id || newId("pe_")),
-              seq: Number.isFinite(Number(e.seq)) ? Number(e.seq) : i + 1,
-              query: String(e.query || "").trim(),
-              at: e.at || new Date().toISOString(),
-              summary: String(e.summary || "").trim(),
-              translation: String(e.translation || "").trim(),
-              ownedCount: Number.isFinite(e.ownedCount) ? e.ownedCount : null,
-              missingCount: Number.isFinite(e.missingCount) ? e.missingCount : null,
-              items: slimInventoryItems(e.items),
-              vocab: slimVocabItems(e.vocab),
-            }))
-        : [];
-      const project = {
+      const project = normalizeProjectRecord({
+        ...raw,
         id,
-        name: String(raw.name || "未命名專案").trim() || "未命名專案",
-        createdAt: raw.createdAt || new Date().toISOString(),
-        updatedAt: raw.updatedAt || new Date().toISOString(),
-        entries,
-      };
+      });
+      if (!project) continue;
+      if (project.collectionId && !colIds.has(project.collectionId)) {
+        project.collectionId = UNGROUPED_COLLECTION_ID;
+      }
       if (byId.has(id)) updated += 1;
       else added += 1;
       byId.set(id, project);
@@ -1545,12 +2562,65 @@ const Storage = (() => {
     return { projects: store.projects, added, updated, total: store.projects.length };
   }
 
+  function formatStorageBytes(n) {
+    const b = Math.max(0, Number(n) || 0);
+    if (b < 1024) return `${Math.round(b)} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  /**
+   * localStorage 每個來源約 5MB（韓語 kgn_* 與日語 jgn_* 同網址會共用）。
+   * 專案句子快照在 IndexedDB，不計入此上限。UTF-16（鍵+值×2）估算。
+   */
+  function measureLocalStorageUsage() {
+    const quota = 5 * 1024 * 1024;
+    const rows = [];
+    let total = 0;
+    let app = 0;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        const val = localStorage.getItem(key) || "";
+        const bytes = (key.length + val.length) * 2;
+        total += bytes;
+        const mine = /^(kgn_|jgn_|fgn_)/.test(key);
+        if (mine) app += bytes;
+        rows.push({ key, bytes, mine });
+      }
+    } catch {
+      /* ignore */
+    }
+    rows.sort((a, b) => b.bytes - a.bytes);
+    const pct = quota ? total / quota : 0;
+    let level = "ok";
+    if (pct >= 0.95) level = "full";
+    else if (pct >= 0.8) level = "warn";
+    const idbBytes = estimateProjectsCacheBytes();
+    return {
+      total,
+      app,
+      quota,
+      pct,
+      level,
+      rows,
+      backend: projectsBackend,
+      idbBytes,
+      idbLabel: formatStorageBytes(idbBytes),
+      totalLabel: formatStorageBytes(total),
+      appLabel: formatStorageBytes(app),
+      quotaLabel: formatStorageBytes(quota),
+    };
+  }
+
   function importProjectsJSON(text) {
     const data = JSON.parse(text);
     let incoming = [];
     if (Array.isArray(data)) {
       incoming = data;
     } else if (data && Array.isArray(data.projects)) {
+      if (Array.isArray(data.collections)) importCollectionsList(data.collections, "merge");
       incoming = data.projects;
     } else if (data && data.id && (data.entries || data.name)) {
       incoming = [data];
@@ -1577,6 +2647,10 @@ const Storage = (() => {
     saveSettings,
     clearApiKey,
     hasApiKey,
+    API_PROVIDERS,
+    getApiProvider,
+    inferApiProviderId,
+    switchApiProvider,
     loadLookupMode,
     saveLookupMode,
     loadLookupModes,
@@ -1591,6 +2665,7 @@ const Storage = (() => {
     clearHistory,
     slimInventoryItems,
     slimVocabItems,
+    slimTokens,
     loadVocabBank,
     saveVocabBank,
     upsertVocabBankEntries,
@@ -1601,12 +2676,30 @@ const Storage = (() => {
     setVocabBankPrimarySense,
     estimateVocabBankCoverage,
     mergeVocabWithBank,
+    ensurePronounVocab,
+    findPronounLocs,
+    pronounAlts,
+    isEnglishVocabSkip,
+    filterEnglishVocab,
+    stripEnglishFromVocabQuery,
+    vocabQueryHasTargetLanguage,
     harvestVocabBankFromSnapshots,
     VOCAB_BANK_MAX,
     HISTORY_MAX,
     normalizeStructureTheme,
     DEFAULT_SETTINGS,
     STRUCTURE_THEMES,
+    UNGROUPED_COLLECTION_ID,
+    listCollections,
+    getCollection,
+    createCollection,
+    renameCollection,
+    deleteCollection,
+    listProjectsByCollection,
+    countUngroupedProjects,
+    summarizeCollection,
+    rememberCollectionLastProject,
+    moveProject,
     listProjects,
     getProject,
     createProject,
@@ -1619,9 +2712,15 @@ const Storage = (() => {
     upsertProjectEntry,
     removeProjectEntry,
     findProjectEntryByQuery,
+    findReusableSnapshotByQuery,
     findProjectEntryBySeq,
     exportProjectsJSON,
     importProjectsJSON,
+    initProjectsDb,
+    flushProjects,
+    getProjectsBackend,
+    measureLocalStorageUsage,
+    formatStorageBytes,
     normalizeQueryKey,
   };
 })();

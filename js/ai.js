@@ -10,7 +10,7 @@ const AiService = (() => {
 {"n":"極短中文用法名（韓語標記）","c":"語尾|助詞|不規則|時態|敬語|連接|句型|其他","e":"繁中說明2–5句","s":"結構式 詞幹＋…"}
 
 規則：
-1. n 必須「極短中文用法名（韓語標記）」，全形括號。標準例：**禁止（-지 마）**、해요體（-아/어요）、主格（이/가）。中文極短；括號內只寫韓語標記。禁止長句標題。
+1. n 必須「功能名稱（韓語標記）」，全形括號。標準例：**禁止（-지 마）**、禮貌體（-아/어요）、主格（이/가）、所有格（의）。中文＝極短功能名；括號內只寫韓語標記。禁止長句標題、禁止韓語在外。禁止 해요體／主題助詞／定語助詞／所有格助詞 等別名。
 2. 無變化格子、keywords。不規則獨立概念；通則可在 e 提「例外見 ○○ 不規則」。
 3. e 只寫用法，盡量無例句。
 4. s 必填：＋ 連零件；→ 結果；開/閉音節同一卡用全形／分列，**開在前閉在後**。
@@ -18,7 +18,7 @@ const AiService = (() => {
 6. 母音縮約標題必須寫「套用範圍」在括號內，禁止只寫「母音縮約」或只寫（해）／（여）／（돼）：
    - 母音縮約（하＋여→해）｜母音縮約（이＋어→여）｜母音縮約（되＋어→돼）
    - 해≠여≠돼，勿混；주＋어→줘、副詞 -게 都不是 해 系。
-7. 不規則必須寫具體種類（ㅂ／ㄷ／ㅅ／르／ㅎ 不規則、ㅡ 脫落），禁止只寫「不規則」。`;
+7. 不規則必須寫具體種類（ㅂ／ㄷ／ㅅ／르／ㅎ 不規則、ㄹ 脫落、ㅡ 脫落），禁止只寫「不規則」。`;
 
   const INVENTORY_SYSTEM = `你是韓語文法助教。盤點句中文法，並給實詞原形與簡義。只輸出一個 JSON（無 markdown／圍欄）。
 
@@ -39,8 +39,9 @@ const AiService = (() => {
 z/k（nameZh/nameKo）可省略（前端從 n 拆）。
 
 文法 i：
-1. n 格式「極短中文用法名（韓語標記）」，全形括號。如 **禁止（-지 마）**、過去（-았/었-）。通則與不規則分開。中文極短。
-2. 只列值得建卡的點；已有本地規則也可列。**若 user 訊息附了「本地已有規則標題」且語意相同，n 必須逐字抄本地標題**（勿改成 過去式／連接語尾 等別名，否則前端會誤判未收錄）。
+1. n 格式「功能名稱（韓語標記）」，全形括號。如 **禁止（-지 마）**、過去（-았/었-）、禮貌體（-아/어요）。通則與不規則分開。中文極短。
+2. 只列值得建卡的點，並使用下列標準功能名；不要自創同義別名（禁止 해요體、主題助詞、主格助詞、합니다體、定語助詞、所有格助詞）。不要推測或迎合使用者的本地筆記本內容。
+2b. **의 只寫** n:"所有格（의）"。定語助詞／所有格助詞／屬格／冠形格 都是同一條，禁止輪流改名。
 3. 不要在 i 寫用法長文／翻譯；建立規則只用名稱。
 4. 一次一主題；縮約只報句中那一個（난≠날）。
 5. **s（span）極重要**：必須是查詢原文裡**原樣找得到**的最短韓文（indexOf 能命中），否則前端會顯示「句中未定位」、無法上色。
@@ -49,12 +50,20 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
    - 複合句型 s 用句中連續字：不可能 →「수 없」或「수 없다」；推測終結 →「을걸」；值得／還可以（-(으)ㄹ 만하다）→「만하」「만해」「을 만하」等（勿只寫 -ㄹ 만하다）
    - 助詞只標語素（너만→만）；過去融合用 갔어요／봤어요 等整詞或能對上的音節
 6. 듯이/같이/없이 的 이 不是主格。
-7. i 寧可少而準。
-7a. **冠形分開**：動詞現在冠形 n:"冠形詞形（-는）"；形容詞現在冠形 n:"冠形詞形（-ㄴ/은）"。s 填句中形（가는、예쁜、작은）。예쁜/큰 的 -ㄴ 是받침，s 仍填完整詞或末音節，勿填 jamo「ㄴ」。
+7. 句中實際出現的文法都要列（助詞、語尾、時態、敬語、連接、不規則、複合句型），不要為了保守而漏列。誤報仍禁止（沒有 거야 就不要 ㄹ 거야；沒有 줘／주세요 就不要請托）。
+7a. **冠形分開**：動詞現在冠形 n:"冠形詞形（-는）"；形容詞現在冠形 n:"冠形詞形（-ㄴ/은）"（含 이다→인）。s 填句中形（가는、예쁜、작은、엉망인）。예쁜/큰/인 的 -ㄴ 是받침，s 仍填完整詞或末音節，勿填 jamo「ㄴ」。
+7e. **不要**把 하다→해 報成 ㅎ 不規則；不要把沒有 요 的 해／아／어 報成禮貌體；不要把 인 걸 的 ㄹ 報成未來推測；不要把 않아 報成 안 或 -지 못하다（沒有 못）。
+7f. **더는／다시는／이제는**＝더／다시／이제＋主題 는，必須列 主題（은/는），s 填「는」或「더는」。禁止漏列。
+7c. **未來／推測冠形** n:"未來推測（-(으)ㄹ）"。s 填句中形（갈、줄、먹을、할），ㄹ 在받침裡時仍填該音節，勿填 jamo「ㄹ」。依存名詞 줄（할 줄 알다）不要標成本語尾。
+7d. **-(으)ㄹ 複合句型必須見到後接表面，禁止只見 ㄹ／을／볼 就套用本地卡：**
+    - 將會／打算（-(으)ㄹ 거야）僅當句中有 **거야／거예요／거다／것이다**。
+    - 不可能（-ㄹ 수 없다）僅當 **수 없／수 없다**；可能（-ㄹ 수 있다）只要有 **수 있-** 即成立，包含 **수 있게／수 있어／수 있도록**。
+    - **볼 수 없게** 的 ㄹ 屬於 수 없다，**不是** ㄹ 거야，也不是裸「未來推測（-(으)ㄹ）」。
+    - 本地標題即使含 -(으)ㄹ，後接對不上就**不要抄**。
 7b. **母音縮約分卡（必須寫套用範圍；해 ≠ 여 ≠ 돼）**：
    - 僅當句中確有「하→해」系表面（해요／해서／했어／했다／해／해줘…）才可列 n:"母音縮約（하＋여→해）"，s 填該表面（해줘 的 해 系 s 填 **해** 或 **해줘**，勿只報 줘）。
    - 僅當詞幹末 이 而縮約（보여、기다려、속삭여、가르쳐…）才可列 n:"母音縮約（이＋어→여）"，s 填 **보여／속삭여／여** 等含 여 的表面。**禁止**把 여 系標成 해 系。
-   - 僅當 되→돼 系（돼요／됐다…）才可列 n:"母音縮約（되＋어→돼）"。
+   - 僅當句中確有「되→돼」縮約表面（돼요／됐어／됐다／돼／돼서）才可列 n:"母音縮約（되＋어→돼）"。**未縮約的 되어／되었다 不要列**；句中沒有 돼／됐 就禁止報這張。
    - **여＋줘 連寫必雙報**（極重要）：속삭여줘、알려줘（알리＋어→여）、가르쳐줘 等＝前面 **이＋어→여** ＋後面 **請托 줘**。i 必須**兩項都列**：
      - n:"母音縮約（이＋어→여）"，s:"속삭여" 或 "여"（須 indexOf 能命中原文）
      - n:"請托（-아/어 줘）"，s:"줘"
@@ -68,12 +77,17 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
    - **禁止**：只報母音縮約／해요體／動詞原形而**省略**請托；여＋줘、해＋줘 都是「縮約＋請托」兩項，不是二選一。
    - 勿把 줘 標成母音縮約（하＋여→해）或只寫「命令（-아/어）」而不提 줘。
 
+標準 n（必須逐字用「功能名稱（韓語）」，勿改寫）：
+禮貌體（-아/어요）｜平語（해체）｜正式體（-습니다）｜過去（-았/었-）｜主題（은/는）｜主格（이/가）｜賓格（을/를）｜所有格（의）｜時間地點（에）｜處所來源（에서）｜冠形詞形（-는）｜冠形詞形（-ㄴ/은）｜未來推測（-(으)ㄹ）｜並列連接（-고）｜原因連接（-아/어서）｜背景對比（-는데）｜背景對比（-ㄴ/은데）｜背景對比（-ㄴ데/인데）｜進行（-고 있다）｜否定（-지 않다）｜主體敬語（-시-）｜指定（이에요/예요）｜希望（-고 싶다）｜值得（-ㄹ 만하다）｜請托（-아/어 줘）｜比喻（듯이）｜限定（만）｜副詞化（-게）｜ㅂ 不規則（ㅂ 불규칙）｜ㄷ 不規則（ㄷ 불규칙）｜ㅅ 不規則（ㅅ 불규칙）｜르 不規則（르 불규칙）｜ㅎ 不規則（ㅎ 불규칙）｜ㄹ 脫落（ㄹ 탈락）｜ㅡ 脫落（ㅡ 탈락）｜母音縮約（하＋여→해）｜母音縮約（이＋어→여）｜母音縮約（되＋어→돼）｜人稱主題縮約（난／넌／전）｜人稱賓格縮約（날／널／절）｜可能（-ㄹ 수 있다）｜不可能（-ㄹ 수 없다）｜將會／打算（-(으)ㄹ 거야）
+
 詞彙 v（原形查詢・必填若句中有實詞）：
 8. 只列實詞（名/動/形/副/代等）；助詞、語尾、語法標記不要進 v。
+8b. **人稱代詞必列、禁止因「太簡單」省略**：나／너／저／우리／저희。句中 **내**（나의「我的」）、**네**、**제**、**내가** 也要列：s 填句中形（내／내가），l 填 나／너／저。
 9. 動詞/形容詞 l 須詞典形 -다（봤어요→보다；들었어요→듣다；있어요→있다）。
 10. 名詞+助詞：친구와→ s 可 친구 或 친구와，l 為 친구。
 11. 하다動詞固定 l 如 공부하다。同 l 去重；g 一句內語境簡義（短）。
 12. a/b 盡量給準；若省略前端用 s 搜尋。
+12b. **歌詞夾雜的英文**（拉丁字母詞、英文翻譯行）不要列入 v；使用者不學英文。
 
 不規則（**嚴格・禁止統括**）：
 13. **禁止** n 只寫「不規則」「불규칙」「不規則活用」等統稱。必須點名**哪一種**：
@@ -82,6 +96,7 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
    - ㅅ 不規則（ㅅ 불규칙）— 짓다→지어
    - 르 不規則（르 불규칙）— 모르다→몰라、부르다→불러
    - ㅎ 不規則（ㅎ 불규칙）— 파랗다→파래요
+   - ㄹ 脫落（ㄹ 탈락）— 들다→드는、살다→사는／삽니다、알다→아니까
    - ㅡ 脫落（ㅡ 탈락）— 크다→커、쓰다→써、바쁘다→바빠
    句中實際用到哪一種就只列那一種；多種並用就**各列一項**，不可合成一條「不規則」。
 14. ㅡ 탈락：s 用融合後表面（커、써、커요），不要填 ㅡ／으。
@@ -134,6 +149,7 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
     "連接",
     "句型",
     "其他",
+    "補充用法",
   ]);
 
   /** 短鍵優先，長鍵相容（舊快照／模型偶發長鍵） */
@@ -209,12 +225,26 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
   function normalizeDraft(data, fallbackTitle) {
     const d = data || {};
     let category = String(pickField(d, "c", "category")).trim();
+    const keepSupplementary =
+      typeof RulesService !== "undefined" &&
+      typeof RulesService.isSupplementaryUsage === "function" &&
+      RulesService.isSupplementaryUsage(category);
     if (!ALLOWED_CAT.has(category)) category = "其他";
+    if (
+      keepSupplementary ||
+      (typeof document !== "undefined" &&
+        document.getElementById("form-category")?.value === "補充用法")
+    ) {
+      category = "補充用法";
+    }
 
     let title =
       String(pickField(d, "n", "title")).trim() ||
       String(fallbackTitle || "").trim() ||
       fallbackTitle;
+    if (typeof RulesService !== "undefined" && typeof RulesService.canonicalInventoryName === "function") {
+      title = RulesService.canonicalInventoryName(title) || title;
+    }
     return {
       title,
       category,
@@ -245,13 +275,22 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
           name = nameKo ? `${nameZh || "文法"}（${nameKo}）` : nameZh;
         }
         if (!name) return null;
+        if (typeof RulesService !== "undefined" && typeof RulesService.canonicalInventoryName === "function") {
+          name = RulesService.canonicalInventoryName(name, { nameZh, nameKo }) || name;
+        }
         if (!nameZh || !nameKo) {
-          const m = name.match(/^(.+?)[（(]\s*(.+?)\s*[）)]\s*$/);
+          const m = name.match(/^(.+?)\s*[（(]\s*(.+?)\s*[）)]\s*$/);
           if (m) {
             nameZh = nameZh || m[1].trim();
             nameKo = nameKo || m[2].trim();
           } else {
             nameZh = nameZh || name;
+          }
+        } else {
+          const m = name.match(/^(.+?)\s*[（(]\s*(.+?)\s*[）)]\s*$/);
+          if (m) {
+            nameZh = m[1].trim();
+            nameKo = m[2].trim();
           }
         }
         let category = String(pickField(it, "c", "category")).trim();
@@ -279,12 +318,40 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
           row.start = start;
           row.end = end;
         }
+        const tokenFrom = Number(it?.tokenFrom ?? it?.aTok);
+        const tokenTo = Number(it?.tokenTo ?? it?.bTok);
+        if (Number.isFinite(tokenFrom)) row.tokenFrom = tokenFrom;
+        if (Number.isFinite(tokenTo)) row.tokenTo = tokenTo;
+        if (it?.kiwiKind) row.kiwiKind = String(it.kiwiKind);
+        const grammarKey = String(pickField(it, "g", "grammarKey", "key")).trim();
+        const candidateId = String(pickField(it, "q", "candidateId", "decisionId")).trim();
+        if (grammarKey) row.grammarKey = grammarKey;
+        if (candidateId) row.candidateId = candidateId;
+        if (it?.note) row.note = String(it.note).trim();
+        const localRuleId = String(it?.localRuleId || "").trim();
+        if (localRuleId) row.localRuleId = localRuleId;
+        if (it?.localAttached) row.localAttached = true;
+        if (it?.draft && typeof it.draft === "object") {
+          row.draft = {
+            title: String(it.draft.title || it.draft.n || "").trim(),
+            category: String(it.draft.category || it.draft.c || "").trim(),
+            explanation: String(it.draft.explanation || it.draft.e || "").trim(),
+            structure: String(it.draft.structure || it.draft.s || "").trim(),
+          };
+        }
         return row;
       })
       .filter(Boolean);
 
-    const rawVocabSrc =
-      raw.v ?? raw.vocab ?? raw.words ?? raw.vocabulary ?? raw.lexicon ?? null;
+    const rawVocabSrc = (() => {
+      const cands = [raw.v, raw.vocab, raw.words, raw.vocabulary, raw.lexicon];
+      const nonempty = cands.find((x) => Array.isArray(x) && x.length);
+      if (nonempty) return nonempty;
+      const firstArr = cands.find((x) => Array.isArray(x));
+      if (firstArr) return firstArr;
+      const obj = cands.find((x) => x && typeof x === "object" && !Array.isArray(x));
+      return obj || [];
+    })();
     const rawVocab = Array.isArray(rawVocabSrc)
       ? rawVocabSrc
       : rawVocabSrc && typeof rawVocabSrc === "object"
@@ -311,9 +378,20 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
           end,
         };
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((w) => !(typeof Storage !== "undefined" && Storage.isEnglishVocabSkip && Storage.isEnglishVocabSkip(w.surface, w.lemma)));
 
-    return { summary, translation, items, vocab };
+    const tokens = Array.isArray(raw.tokens) ? raw.tokens : [];
+    const out = { summary, translation, items, vocab };
+    if (tokens.length) out.tokens = tokens;
+    if (raw.mappingFailed) out.mappingFailed = true;
+    if (raw.fallbackLegacy) out.fallbackLegacy = true;
+    const rejected = Number(raw.apiRejectedCount);
+    const unresolved = Number(raw.unresolvedGrammarCount);
+    if (Number.isFinite(rejected) && rejected > 0) out.apiRejectedCount = rejected;
+    if (Number.isFinite(unresolved) && unresolved > 0) out.unresolvedGrammarCount = unresolved;
+    if (raw.apiRepairUsed) out.apiRepairUsed = true;
+    return out;
   }
 
   function isReasoningModel(model) {
@@ -442,7 +520,7 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
         { role: "system", content: RULE_SYSTEM },
         {
           role: "user",
-          content: `規則名：${t}\n\n請輸出短鍵 JSON：n/c/e/s。n 必須「極短中文用法名（韓語標記）」，如 禁止（-지 마）。e 無例句；s 必填。一次一主題。開/閉音節同卡時開在前、全形／分隔。`,
+          content: `規則名：${t}\n\n請輸出短鍵 JSON：n/c/e/s。n 必須「功能名稱（韓語標記）」，如 禁止（-지 마）、禮貌體（-아/어요）。e 無例句；s 必填。一次一主題。開/閉音節同卡時開在前、全形／分隔。`,
         },
       ],
       temperature: 0.25,
@@ -451,6 +529,116 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
 
     const parsed = extractJson(content);
     return normalizeDraft(parsed, t);
+  }
+
+  const RULE_BATCH_SYSTEM = `${RULE_SYSTEM}
+
+批次時只輸出：{"r":[{...},{...}]}
+r 的順序必須對應使用者列出的規則名；每一項仍用短鍵 n/c/e/s。不要 markdown。`;
+
+  /**
+   * 依規則名批次生成卡片內容（不寫入筆記本）。
+   * 回傳與 names 等長的 draft 陣列。
+   */
+  async function completeRulesFromNames(names) {
+    const list = (Array.isArray(names) ? names : []).map((n) => String(n || "").trim());
+    if (!list.length) return [];
+
+    const unique = [];
+    const mapToUnique = [];
+    const seen = new Map();
+    for (const n of list) {
+      const key = n || "";
+      if (!key) {
+        mapToUnique.push(-1);
+        continue;
+      }
+      if (seen.has(key)) {
+        mapToUnique.push(seen.get(key));
+        continue;
+      }
+      if (unique.length >= 24) {
+        mapToUnique.push(-1);
+        continue;
+      }
+      seen.set(key, unique.length);
+      mapToUnique.push(unique.length);
+      unique.push(key);
+    }
+    if (!unique.length) {
+      return list.map((n) => ({ title: n, category: "其他", explanation: "", structure: "" }));
+    }
+
+    const content = await chatComplete({
+      messages: [
+        { role: "system", content: RULE_BATCH_SYSTEM },
+        {
+          role: "user",
+          content: `請依序為下列規則名各產出一張卡（短鍵 n/c/e/s；包在 r 陣列）：\n${unique
+            .map((n, i) => `${i + 1}. ${n}`)
+            .join("\n")}`,
+        },
+      ],
+      temperature: 0.25,
+      json: true,
+    });
+
+    const parsed = extractJson(content);
+    const rawArr = Array.isArray(parsed?.r)
+      ? parsed.r
+      : Array.isArray(parsed?.rules)
+        ? parsed.rules
+        : Array.isArray(parsed)
+          ? parsed
+          : [];
+
+    const byUnique = unique.map((name, i) => {
+      let row = rawArr[i];
+      if (!row || typeof row !== "object") {
+        const want = name;
+        row = rawArr.find((x) => {
+          const n = String(pickField(x, "n", "title") || "").trim();
+          return n && (n === want || n.includes(want) || want.includes(n));
+        });
+      }
+      return normalizeDraft(row || {}, name);
+    });
+
+    return list.map((name, i) => {
+      const u = mapToUnique[i];
+      if (u < 0) return { title: name, category: "其他", explanation: "", structure: "" };
+      return byUnique[u] || { title: name, category: "其他", explanation: "", structure: "" };
+    });
+  }
+
+  /**
+   * 尚未掛上本地卡的盤點項，補上本句用的結構／說明草稿（不寫入筆記本）。
+   */
+  async function fillMissingRuleDrafts(inventory) {
+    const inv = inventory && typeof inventory === "object" ? inventory : { items: [] };
+    const items = Array.isArray(inv.items) ? inv.items : [];
+    const need = [];
+    for (const it of items) {
+      if (!it || typeof it !== "object") continue;
+      if (it.manualRuleId || it.localRuleId) continue;
+      if (it.draft && (it.draft.explanation || it.draft.structure || it.draft.title)) continue;
+      if (typeof RulesService !== "undefined" && typeof RulesService.findInventoryRule === "function") {
+        const match = RulesService.findInventoryRule(it);
+        if (match?.owned && match.rule) {
+          it.localRuleId = match.rule.id;
+          it.localAttached = true;
+          it.name = match.rule.title;
+          continue;
+        }
+      }
+      need.push(it);
+    }
+    if (!need.length) return inv;
+    const drafts = await completeRulesFromNames(need.map((it) => it.name || it.title || ""));
+    for (let i = 0; i < need.length; i++) {
+      if (drafts[i]) need[i].draft = drafts[i];
+    }
+    return inv;
   }
 
   /** 僅單字／原形：短 prompt、不帶本地規則標題（省 tokens） */
@@ -462,27 +650,203 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
 規則：
 1. 禁止輸出文法陣列 i／items（助詞、語尾、不規則、母音縮約等一律不要）。
 2. v 只列實詞；助詞／語尾／語法標記不要進 v。
+2b. **人稱代詞必列**：나／너／저／우리／저희；句中 내（나의）、네、제、내가 也要列（s=句中形，l=나／너／저）。不要因為簡單而省略。
 3. 動詞／形容詞 l 須詞典形 -다（봤어요→보다）。
-4. p 用完整中文詞性；同 l 去重；g 短；a/b 盡量準。`;
+4. p 用完整中文詞性；同 l 去重；g 短；a/b 盡量準。
+5. 夾雜的英文（拉丁字母、英文翻譯行）不要列入 v。`;
+
+  const MAP_SYSTEM = `你是韓語文法審核器。依原句、Kiwi 切詞及必處理清單，獨立判定句中實際文法；不知道使用者有哪些本地卡。只輸出 JSON。
+
+格式：{"u":"短摘要","t":"整句繁中翻譯","fn":[{"q":"清單ID或new:序號","x":"confirmed|rejected|reclassified|unknown","g":"穩定文法key","n":"極短中文名（韓語標記）","a":0,"b":0,"c":"語尾|助詞|不規則|時態|敬語|連接|句型|其他","f":"h|m|l","e":"短理由"}]}
+
+硬性規則：
+1. 必處理清單的每個 ID 在 fn 恰好出現一次；不可漏答。正確=x confirmed；功能錯誤=x reclassified；不存在=x rejected；真的無法判斷=x unknown。
+2. rejected／unknown 可省 n/g/a/b；confirmed／reclassified 必填 g/n/a/b/c/f。補充清單外文法用 q="new:1" 起編。
+3. g 是跨句穩定的 ASCII 語義鍵（例 particle:topic、ending:adnominal-present、pattern:eul-su-itda），不可把本地卡名當 key。
+4. a/b 是切詞編號且含兩端。只覆蓋文法標記；不含前方實詞。助詞、語尾、不規則、時態、敬語、連接與複合句型都需檢查。
+5. n 固定「功能名稱（韓語標記）」，全形括號（例：主題（은/는）、禮貌體（-아/어요）、所有格（의））。確認清單項時 n 盡量與清單名稱相同；新文法也用此格式。禁止 해요體／主題助詞／定語助詞／所有格助詞 等別名。同形異義須依語境改判。母音縮約須點名 해/여/돼 系；不規則須點名種類。
+6. 有 줘/주세요 必查請托（-아/어 줘）。수 있-（含 있게/있어/있도록）必查可能；수 없- 必查不可能；沒有 거야/거예요 不可判 ㄹ 거야。
+7. 只列實際成立且值得建卡的點；清單候選不成立就明確 rejected，不可為了湊數確認。
+8. 形態優先：切詞標籤與清單 kind 衝突時以切詞為準（JKO 的 ㄹ 不是 ETM 未來冠形；EF 無 요 是平語不是禮貌體）。
+8e. **더는／다시는／이제는／아직은** 等＝副詞＋主題 은/는，即使切成一個詞也要確認主題（은/는）。는 不是冠形。
+8b. **해／해요**：沒有 요 不可確認禮貌體（-아/어요）。하다→해 是母音縮約，不是 ㅎ 不規則。
+8c. **인 걸／는 걸**：ㄴ 是이다冠形，걸 是 것＋을 或句末感嘆，禁止未來推測（-(으)ㄹ）。
+8d. **-지 않다 ≠ -지 못하다**：沒有 못／못해 不可確認 못하다。않아 的 않 不是副詞 안。使役 -게 하다 必須見到 게。
+9. 標準 n：禮貌體（-아/어요）｜平語（해체）｜正式體（-습니다）｜過去（-았/었-）｜主題（은/는）｜主格（이/가）｜賓格（을/를）｜所有格（의）｜冠形詞形（-는）｜冠形詞形（-ㄴ/은）｜未來推測（-(으)ㄹ）｜請托（-아/어 줘）。其餘同樣「功能名稱（韓語）」。`;
+
+  /**
+   * Kiwi 切詞後，請模型把語素區間對上規則卡名。
+   */
+  async function mapGrammarFunctions(query, tokens, candidates, checklistInput, repairOnly = false) {
+    const q = String(query || "").trim();
+    const checklist = Array.isArray(checklistInput)
+      ? checklistInput
+      : KoParse.grammarChecklist(tokens, candidates);
+    const tokenLines =
+      typeof KoParse !== "undefined" && KoParse.compactTokenLines
+        ? KoParse.compactTokenLines(tokens)
+        : "";
+    const candLines =
+      typeof KoParse !== "undefined" && KoParse.compactCandidateLines
+        ? KoParse.compactCandidateLines(candidates)
+        : "";
+    const checklistLines =
+      typeof KoParse.compactChecklistLines === "function"
+        ? KoParse.compactChecklistLines(checklist)
+        : "";
+    const content = await chatComplete({
+      messages: [
+        { role: "system", content: MAP_SYSTEM },
+        {
+          role: "user",
+          content: `原文：\n${q}\n\n切詞：\n${tokenLines}\n\n程式候選：\n${candLines || "（無）"}\n\n必處理清單（每個 ID 恰答一次）：\n${checklistLines || "（空；仍可補 new 文法）"}${
+            repairOnly ? "\n\n這是補查：只回答上列未完成 ID，不要新增 new 項目。" : ""
+          }`,
+        },
+      ],
+      temperature: 0.2,
+      json: true,
+    });
+    return KoParse.parseMappedFunctions(extractJson(content));
+  }
+
+  function mergeMappedGrammar(base, patch) {
+    const left = base || {};
+    const right = patch || {};
+    const decisionMap = new Map();
+    for (const d of [...(left.decisions || []), ...(right.decisions || [])]) {
+      const id = String(d?.candidateId || "").trim();
+      if (id) decisionMap.set(id, d);
+    }
+    const fnMap = new Map();
+    for (const fn of [...(left.functions || []), ...(right.functions || [])]) {
+      const id = String(fn?.candidateId || "").trim();
+      const key = id || `${fn?.grammarKey || fn?.name || "?"}:${fn?.tokenFrom}:${fn?.tokenTo}`;
+      fnMap.set(key, fn);
+    }
+    const rejected = new Set(
+      [...decisionMap.values()]
+        .filter((d) => d.status === "rejected" || d.status === "unknown")
+        .map((d) => d.candidateId)
+    );
+    return {
+      functions: [...fnMap.values()].filter(
+        (fn) => !fn.candidateId || !rejected.has(fn.candidateId)
+      ),
+      decisions: [...decisionMap.values()],
+      translation: left.translation || right.translation || "",
+      summary: left.summary || right.summary || "",
+    };
+  }
+
+  async function repairGrammarFunctions(query, tokens, candidates, unresolved) {
+    const ids = new Set((unresolved || []).map((x) => x.id));
+    const relevant = (candidates || []).filter((c) => ids.has(KoParse.candidateDecisionId(c)));
+    return mapGrammarFunctions(query, tokens, relevant, unresolved, true);
+  }
+
+  /**
+   * 先 Kiwi 切詞、再對卡（對齊日語 school-parse；切詞失敗時由呼叫端回退舊盤點）。
+   */
+  async function inventoryByKoParse(query, opts = {}) {
+    const q = String(query || "").trim();
+    if (!q) throw new Error("請輸入查詢內容");
+    if (typeof KoParse === "undefined" || !KoParse.fromKiwi) {
+      throw new Error("KoParse 未載入");
+    }
+    if (typeof KiwiService === "undefined" || !KiwiService.isEnabled()) {
+      throw new Error("形態素分析未開啟");
+    }
+    await KiwiService.ensureReady();
+    const kiwiToks = await KiwiService.tokenize(q);
+    if (!Array.isArray(kiwiToks) || !kiwiToks.length) {
+      throw new Error("切詞結果沒有有效語素");
+    }
+    const tokens = KoParse.fromKiwi(q, kiwiToks);
+    if (!tokens.length) throw new Error("切詞結果無法還原原文");
+
+    const candidates = KoParse.deterministicFunctions(q, tokens);
+    const checklist = KoParse.grammarChecklist(tokens, candidates);
+    let mapped = { functions: [], decisions: [], translation: "", summary: "" };
+    let firstMappingFailed = false;
+    try {
+      mapped = await mapGrammarFunctions(q, tokens, candidates, checklist);
+    } catch (err) {
+      console.warn("[mapGrammarFunctions]", err);
+      firstMappingFailed = true;
+      mapped = {
+        functions: [],
+        decisions: [],
+        translation: "",
+        summary: "形態素切詞完成；文法對卡未完成，僅列出高信心項目",
+      };
+    }
+
+    let unresolved = KoParse.unresolvedGrammarChecklist(checklist, mapped);
+    let apiRepairUsed = false;
+    if (unresolved.length) {
+      apiRepairUsed = true;
+      try {
+        const repaired = await repairGrammarFunctions(q, tokens, candidates, unresolved);
+        mapped = mergeMappedGrammar(mapped, repaired);
+      } catch (err) {
+        console.warn("[repairGrammarFunctions]", err);
+      }
+      unresolved = KoParse.unresolvedGrammarChecklist(checklist, mapped);
+    }
+    const mappingFailed = unresolved.length > 0;
+    const items = KoParse.functionsToItems(tokens, mapped.functions, candidates, {
+      mappingFailed,
+      src: q,
+      candidateDecisions: mapped.decisions,
+    });
+    const vocab = opts.skipVocab ? [] : KoParse.tokensToVocab(tokens);
+    if (typeof RulesService !== "undefined" && RulesService.enrichInventoryWithSurfaceHints) {
+      const hinted = RulesService.enrichInventoryWithSurfaceHints(q, { items, vocab, translation: mapped.translation });
+      if (Array.isArray(hinted.items)) {
+        for (const extra of hinted.items) {
+          if (!items.some((it) => it.name === extra.name && it.start === extra.start && it.end === extra.end)) {
+            items.push(extra);
+          }
+        }
+      }
+    }
+    const nTok = tokens.filter((t) => t.pos !== "記號").length;
+    const apiRejectedCount = (mapped.decisions || []).filter(
+      (d) => d.status === "rejected"
+    ).length;
+    return {
+      summary:
+        mapped.summary ||
+        (mappingFailed
+          ? `形態素切詞 ${nTok} 塊 · 尚有 ${unresolved.length} 項待確認`
+          : `形態素切詞 ${nTok} 塊 · 文法 ${items.length} 點`),
+      translation: mapped.translation || "",
+      items,
+      vocab,
+      tokens: KoParse.slimTokens(tokens),
+      mappingFailed,
+      firstMappingFailed,
+      apiRejectedCount,
+      unresolvedGrammarCount: unresolved.length,
+      apiRepairUsed,
+    };
+  }
 
   /**
    * 查詢時文法盤點
    * @param {string} query
-   * @param {string[]} localTitles
    */
-  async function inventoryGrammar(query, localTitles = []) {
+  async function inventoryGrammar(query) {
     const q = String(query || "").trim();
     if (!q) throw new Error("請輸入查詢內容");
 
-    // 盡量帶齊本地標題，讓模型 n 與筆記本一致（前端仍會正規化比對）
-    const titleList =
-      (localTitles || []).slice(0, 200).join("\n") || "（尚無本地規則）";
     const content = await chatComplete({
       messages: [
         { role: "system", content: INVENTORY_SYSTEM },
         {
           role: "user",
-          content: `查詢內容：\n${q}\n\n本地已有規則標題（若句中文法已在下列，n 請**逐字使用本地標題**，勿自創同義別名）：\n${titleList}\n\n請輸出短鍵 JSON（u/t/i/v）。t 整句翻譯；i 文法；v 實詞原形+簡義（含 a/b 或 s）。`,
+          content: `查詢內容：\n${q}\n\n請先獨立盤點句中所有實際文法，不參考任何本地筆記本內容。請輸出短鍵 JSON（u/t/i/v）。t 整句翻譯；i 文法；v 實詞原形+簡義（含 a/b 或 s）。`,
         },
       ],
       temperature: 0.2,
@@ -535,6 +899,9 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
   async function completeWordFromSurface(surface, sentence = "") {
     const surf = String(surface || "").trim();
     if (!surf) throw new Error("沒有選取的詞");
+    if (typeof Storage !== "undefined" && Storage.isEnglishVocabSkip && Storage.isEnglishVocabSkip(surf)) {
+      throw new Error("這是英文詞，已略過（不查詢、不收入單字庫）");
+    }
     const ctx = String(sentence || "").trim();
     const content = await chatComplete({
       messages: [
@@ -584,7 +951,11 @@ p 必須完整中文詞性。`,
   return {
     getConfig,
     completeRuleFromTitle,
+    completeRulesFromNames,
+    fillMissingRuleDrafts,
     completeWordFromSurface,
+    mapGrammarFunctions,
+    inventoryByKoParse,
     inventoryGrammar,
     inventoryVocabOnly,
     normalizeInventory,

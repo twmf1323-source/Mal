@@ -1,6 +1,6 @@
 /**
  * 規則 CRUD 與本地搜尋
- * 模型：雙語標題 中文（韓語）+ 分類 + 詳細說明
+ * 模型：雙語標題 功能名稱（韓語）+ 分類 + 詳細說明
  * 不做變化格子；不規則各自成卡
  */
 const RulesService = (() => {
@@ -44,12 +44,14 @@ const RulesService = (() => {
     "seed-topic-contraction-jeon",
     "seed-adnominal-neun",
     "seed-adnominal-eun",
+    "seed-adnominal-eul",
     "seed-subject",
     "seed-deusi",
     "seed-object",
     "seed-object-contraction-nal",
     "seed-object-contraction-neol",
     "seed-object-contraction-jeol",
+    "seed-ui",
     "seed-e",
     "seed-eseo",
     "seed-go",
@@ -64,6 +66,7 @@ const RulesService = (() => {
     "seed-s-irregular",
     "seed-reu-irregular",
     "seed-h-irregular",
+    "seed-l-deletion",
     "seed-eu-deletion",
     "seed-vowel-hae",
     "seed-vowel-yeo",
@@ -144,7 +147,10 @@ const RulesService = (() => {
 
     return {
       id: existing?.id || input?.id || uid(),
-      title: (input?.title || existing?.title || "").trim() || "未命名規則",
+      title:
+        formatFunctionTitle(input?.title || existing?.title || "") ||
+        (input?.title || existing?.title || "").trim() ||
+        "未命名規則",
       category: String(input?.category ?? existing?.category ?? "").trim(),
       explanation: (input?.explanation ?? existing?.explanation ?? "").trim(),
       /** 可視化結構式，如：詞幹＋지 않다、主詞＋（이/가） */
@@ -407,8 +413,24 @@ const RulesService = (() => {
       ["賓格", "賓格助詞", "受詞", "目的格"],
       ["敬語", "主體敬語", "尊敬"],
       ["冠形", "冠形詞形", "定語", "管形"],
+      ["未來推測", "未來冠形", "推測冠形", "未來"],
       ["請托", "命令", "命令請托", "給我"],
       ["值得", "還可以", "值得還可以"],
+      ["禮貌", "禮貌體", "해요", "해요體", "해요체"],
+      ["平語", "해체", "반말", "非敬語"],
+      ["正式", "正式體", "합니다體", "합쇼體", "합쇼"],
+      ["指定", "指定詞", "判斷"],
+      ["時間地點", "處所", "時間", "地點"],
+      ["處所來源", "場所", "來源"],
+      ["背景對比", "狀況", "轉折"],
+      ["人稱主題縮約", "主題縮約"],
+      ["人稱賓格縮約", "賓格縮約"],
+      ["限定", "只有", "僅僅"],
+      ["副詞化", "副詞形"],
+      ["可能", "可能性", "可以"],
+      ["不可能", "無法"],
+      ["將會", "打算", "未來意圖"],
+      ["所有格", "所有格助詞", "定語助詞", "定語格", "屬格", "冠形格"],
     ];
     for (const g of ALIAS_GROUPS) {
       const hitA = g.some((x) => na === x || na.includes(x) || sa === x);
@@ -427,6 +449,10 @@ const RulesService = (() => {
     if (/\(으\)/.test(base)) {
       keys.add(base.replace(/\(으\)/g, ""));
       keys.add(base.replace(/\(으\)/g, "으"));
+    }
+    // (으)ㄹ 的閉音節表面是 을（먹을），不是公式字 ㄹ
+    if (/\(으\)ㄹ/.test(base) || /(^|[^가-힣])을\/ㄹ/.test(base)) {
+      keys.add("을");
     }
     // 已寫成 으시／을 而無括號時，也登錄去 으 短形（僅語尾常見）
     if (/^으시/.test(base)) keys.add(base.replace(/^으/, ""));
@@ -519,7 +545,7 @@ const RulesService = (() => {
 
   /**
    * 不規則種類（禁止統稱「不規則」對上任意一張）
-   * @returns {'ㅂ'|'ㄷ'|'ㅅ'|'르'|'ㅎ'|'eu'|'generic'|null}
+   * @returns {'ㅂ'|'ㄷ'|'ㅅ'|'르'|'ㅎ'|'ㄹ'|'eu'|'generic'|null}
    */
   function extractIrregularKind(...blobs) {
     const s = blobs.map((b) => String(b || "")).join("\n");
@@ -531,6 +557,7 @@ const RulesService = (() => {
     if (/ㅅ\s*不規則|ㅅ\s*불규칙|\bㅅ\b.*不規則|不規則.*ㅅ/i.test(s)) return "ㅅ";
     if (/르\s*不規則|르\s*불규칙|ㄹ\s*르|reu\s*irreg/i.test(s)) return "르";
     if (/ㅎ\s*不規則|ㅎ\s*불규칙|\bㅎ\b.*不規則|不規則.*ㅎ/i.test(s)) return "ㅎ";
+    if (/ㄹ\s*탈락|ㄹ\s*脫落|ㄹ\s*不規則|ㄹ\s*불규칙|l\s*delet|rieul\s*drop/i.test(s)) return "ㄹ";
     // 括號韓語段僅 ㅂ／ㄷ…
     const p = parseBilingualTitle(blobs[0] || "");
     if (p.ko) {
@@ -538,8 +565,9 @@ const RulesService = (() => {
       if (/^ㅂ/.test(ko) && /불규칙|不規則/.test(s)) return "ㅂ";
       if (/^ㄷ/.test(ko) && /불규칙|不規則/.test(s)) return "ㄷ";
       if (/^ㅅ/.test(ko) && /불규칙|不規則/.test(s)) return "ㅅ";
-      if (/^르|^ㄹ/.test(ko) && /불규칙|不規則/.test(s)) return "르";
+      if (/^르/.test(ko) && /불규칙|不規則/.test(s)) return "르";
       if (/^ㅎ/.test(ko) && /불규칙|不規則/.test(s)) return "ㅎ";
+      if (/^ㄹ/.test(ko) && /탈락|脫落|불규칙|不規則/.test(s)) return "ㄹ";
     }
     // 僅有統稱
     if (/不規則|불규칙|irregular/i.test(s)) return "generic";
@@ -551,10 +579,326 @@ const RulesService = (() => {
     return extractIrregularKind(rule.title, rule.structure, rule.explanation, rule.category);
   }
 
+  function hasHangulScript(s) {
+    return /[\uAC00-\uD7A3ㄱ-ㅎㅏ-ㅣ]/.test(String(s || ""));
+  }
+
+  function hasHanScript(s) {
+    return /[\u4e00-\u9fff]/.test(String(s || ""));
+  }
+
+  /** 括號內／外是否像韓語標記（助詞、語尾、不規則名） */
+  function looksKoreanMarker(s) {
+    const t = String(s || "").trim();
+    if (!t) return false;
+    if (hasHanScript(t) && /不規則|脫落|縮約|語尾|助詞/.test(t)) return false;
+    if (hasHangulScript(t) && !hasHanScript(t)) return true;
+    const compact = t.replace(/\s+/g, "");
+    if (/^[ㅂㄷㅅㅎㄹㅡ르](불규칙|탈락|不規則|脫落)$/.test(compact)) return true;
+    return /^[-~〜(으)ㄴㄹㅂ습았었요어아여워와돼해졌]+$/.test(compact);
+  }
+
+  function looksChineseFunction(s) {
+    const t = String(s || "").trim();
+    if (!t) return false;
+    if (hasHangulScript(t) && !hasHanScript(t)) return false;
+    return hasHanScript(t);
+  }
+
+  /**
+   * 標題格式：功能名稱（韓語）
+   * 半形括號→全形；韓語在外、中文在內則翻轉。
+   */
+  function formatFunctionTitle(title) {
+    const raw = String(title || "")
+      .trim()
+      .normalize("NFC");
+    if (!raw) return "";
+    const m = raw.match(/^(.+?)\s*[（(]\s*(.+?)\s*[）)]\s*$/);
+    if (!m) return raw;
+    const outer = m[1].trim();
+    const inner = m[2].trim();
+    if (looksKoreanMarker(outer) && looksChineseFunction(inner)) {
+      return `${inner}（${outer}）`;
+    }
+    return `${outer}（${inner}）`;
+  }
+
+  function shortenFunctionZh(zh) {
+    return String(zh || "")
+      .trim()
+      .replace(/[・·‧•･]/g, "")
+      .replace(/(助詞|語尾|連結語尾|連接語尾|接續語尾|接尾詞|接尾)$/g, "")
+      .trim();
+  }
+
+  /**
+   * 標準卡名（功能名稱＋韓語標記）。AI 別名對到這裡再去對本地卡。
+   * ko 列常見寫法差（요 黏寫、有無 hyphen、(으)）。
+   */
+  const CANONICAL_FUNCTIONS = [
+    { title: "禮貌體（-아/어요）", zh: ["禮貌體", "해요體", "해요체", "尊待體"], ko: ["-아/어요", "아/어요", "-아요/어요", "아요/어요", "해요"] },
+    { title: "平語（해체）", zh: ["平語", "해체", "반말", "非敬語"], ko: ["해체", "반말"] },
+    { title: "正式體（-습니다）", zh: ["正式體", "합니다體", "합쇼體"], ko: ["-습니다", "습니다", "-ㅂ니다", "ㅂ니다", "-습니다/ㅂ니다"] },
+    { title: "過去（-았/었-）", zh: ["過去"], ko: ["-았/었-", "-았/었", "았/었", "-았어요/었어요", "았어요/었어요", "-았/었어요"] },
+    { title: "主題（은/는）", zh: ["主題", "話題"], ko: ["은/는", "-은/는"] },
+    { title: "人稱主題縮約（난）", zh: ["人稱主題縮約"], ko: ["난"] },
+    { title: "人稱主題縮約（넌）", zh: ["人稱主題縮約"], ko: ["넌"] },
+    { title: "人稱主題縮約（전）", zh: ["人稱主題縮約"], ko: ["전"] },
+    { title: "冠形詞形（-는）", zh: ["冠形詞形", "定語"], ko: ["-는"] },
+    { title: "冠形詞形（-ㄴ/은）", zh: ["冠形詞形", "定語"], ko: ["-ㄴ/은", "ㄴ/은", "-은"] },
+    { title: "未來推測（-(으)ㄹ）", zh: ["未來推測", "未來冠形"], ko: ["-(으)ㄹ", "(으)ㄹ", "-을/ㄹ", "을/ㄹ"] },
+    { title: "主格（이/가）", zh: ["主格", "主語"], ko: ["이/가", "-이/가"] },
+    { title: "比喻（듯이）", zh: ["比喻"], ko: ["듯이", "듯"] },
+    { title: "賓格（을/를）", zh: ["賓格", "受詞", "目的格"], ko: ["을/를", "-을/를"] },
+    { title: "所有格（의）", zh: ["所有格", "所有格助詞", "定語助詞", "定語格", "屬格", "冠形格"], ko: ["의", "-의"] },
+    { title: "人稱賓格縮約（날）", zh: ["人稱賓格縮約"], ko: ["날"] },
+    { title: "人稱賓格縮約（널）", zh: ["人稱賓格縮約"], ko: ["널"] },
+    { title: "人稱賓格縮約（절）", zh: ["人稱賓格縮約"], ko: ["절"] },
+    { title: "時間地點（에）", zh: ["時間地點"], ko: ["에"] },
+    { title: "處所來源（에서）", zh: ["處所來源"], ko: ["에서"] },
+    { title: "並列連接（-고）", zh: ["並列連接", "並列"], ko: ["-고", "고"] },
+    { title: "原因連接（-아/어서）", zh: ["原因連接", "原因"], ko: ["-아/어서", "아/어서", "-아서/어서", "아서/어서"] },
+    { title: "背景對比（-는데）", zh: ["背景對比"], ko: ["-는데", "는데"] },
+    { title: "背景對比（-ㄴ/은데）", zh: ["背景對比"], ko: ["-ㄴ/은데", "ㄴ/은데", "-은데", "은데"] },
+    { title: "背景對比（-ㄴ데/인데）", zh: ["背景對比"], ko: ["-ㄴ데/인데", "ㄴ데/인데", "-인데", "인데"] },
+    { title: "進行（-고 있다）", zh: ["進行"], ko: ["-고 있다", "고 있다", "-고 있어요", "고 있어요"] },
+    { title: "否定（-지 않다）", zh: ["否定"], ko: ["-지 않다", "지 않다", "-지 않아요", "지 않아요"] },
+    { title: "ㅂ 不規則（ㅂ 불규칙）", zh: ["ㅂ 不規則"], ko: ["ㅂ 불규칙", "ㅂ불규칙"] },
+    { title: "ㄷ 不規則（ㄷ 불규칙）", zh: ["ㄷ 不規則"], ko: ["ㄷ 불규칙", "ㄷ불규칙"] },
+    { title: "ㅅ 不規則（ㅅ 불규칙）", zh: ["ㅅ 不規則"], ko: ["ㅅ 불규칙", "ㅅ불규칙"] },
+    { title: "르 不規則（르 불규칙）", zh: ["르 不規則"], ko: ["르 불규칙", "르불규칙"] },
+    { title: "ㅎ 不規則（ㅎ 불규칙）", zh: ["ㅎ 不規則"], ko: ["ㅎ 불규칙", "ㅎ불규칙"] },
+    { title: "ㄹ 脫落（ㄹ 탈락）", zh: ["ㄹ 脫落"], ko: ["ㄹ 탈락", "ㄹ탈락", "ㄹ 脫落"] },
+    { title: "ㅡ 脫落（ㅡ 탈락）", zh: ["ㅡ 脫落", "으 脫落"], ko: ["ㅡ 탈락", "ㅡ탈락", "으 탈락", "으탈락", "ㅡ 脫落"] },
+    { title: "母音縮約（하＋여→해）", zh: ["母音縮約"], ko: ["하＋여→해", "하+여→해", "해", "해요", "해서", "했어"] },
+    { title: "母音縮約（이＋어→여）", zh: ["母音縮約"], ko: ["이＋어→여", "이+어→여", "여", "여요", "여서"] },
+    { title: "母音縮約（되＋어→돼）", zh: ["母音縮約"], ko: ["되＋어→돼", "되+어→돼", "돼", "돼요", "돼서"] },
+    { title: "主體敬語（-시-）", zh: ["主體敬語", "敬語"], ko: ["-시-", "시", "-(으)시-", "(으)시"] },
+    { title: "指定（이에요/예요）", zh: ["指定", "指定詞"], ko: ["이에요/예요", "예요/이에요", "-이에요/예요"] },
+    { title: "希望（-고 싶다）", zh: ["希望", "願望", "想要"], ko: ["-고 싶다", "고 싶다", "-고 싶어요", "고 싶어요"] },
+    { title: "值得（-ㄹ 만하다）", zh: ["值得"], ko: ["-ㄹ 만하다", "ㄹ 만하다", "-(으)ㄹ 만하다", "(으)ㄹ 만하다"] },
+    { title: "請托（-아/어 줘）", zh: ["請托", "命令請托"], ko: ["-아/어 줘", "아/어 줘", "-아/어 주세요", "줘", "주세요"] },
+    { title: "限定（만）", zh: ["限定"], ko: ["만"] },
+    { title: "副詞化（-게）", zh: ["副詞化", "副詞形"], ko: ["-게", "게"] },
+    { title: "可能（-ㄹ 수 있다）", zh: ["可能", "可能性"], ko: ["-ㄹ 수 있다", "ㄹ 수 있다", "-(으)ㄹ 수 있다"] },
+    { title: "不可能（-ㄹ 수 없다）", zh: ["不可能"], ko: ["-ㄹ 수 없다", "ㄹ 수 없다", "-(으)ㄹ 수 없다"] },
+    { title: "將會／打算（-(으)ㄹ 거야）", zh: ["將會／打算", "將會", "打算"], ko: ["-(으)ㄹ 거야", "(으)ㄹ 거야", "-ㄹ 거야", "ㄹ 거야"] },
+  ];
+
+  const TITLE_ALIASES = {
+    "해요體（-아/어요）": "禮貌體（-아/어요）",
+    "해체（반말）": "平語（해체）",
+    "합니다體（-습니다）": "正式體（-습니다）",
+    "主題助詞（은/는）": "主題（은/는）",
+    "主題（는）": "主題（은/는）",
+    "主題（은）": "主題（은/는）",
+    "主題助詞（는）": "主題（은/는）",
+    "主題助詞（은）": "主題（은/는）",
+    "主格（가）": "主格（이/가）",
+    "主格（이）": "主格（이/가）",
+    "主格助詞（가）": "主格（이/가）",
+    "賓格（를）": "賓格（을/를）",
+    "賓格（을）": "賓格（을/를）",
+    "賓格助詞（를）": "賓格（을/를）",
+    "主格助詞（이/가）": "主格（이/가）",
+    "比喻接尾（듯이）": "比喻（듯이）",
+    "賓格助詞（을/를）": "賓格（을/를）",
+    "時間地點助詞（에）": "時間地點（에）",
+    "處所來源助詞（에서）": "處所來源（에서）",
+    "背景對比連結・動詞（-는데）": "背景對比（-는데）",
+    "背景對比連結・形容詞（-ㄴ/은데）": "背景對比（-ㄴ/은데）",
+    "背景對比連結・名詞（-ㄴ데/인데）": "背景對比（-ㄴ데/인데）",
+    "指定詞해요體（이에요/예요）": "指定（이에요/예요）",
+    "值得／還可以（-(으)ㄹ 만하다）": "值得（-ㄹ 만하다）",
+    "命令／請托（-아/어 줘）": "請托（-아/어 줘）",
+    "定語助詞（의）": "所有格（의）",
+    "所有格助詞（의）": "所有格（의）",
+    "屬格助詞（의）": "所有格（의）",
+    "屬格（의）": "所有格（의）",
+    "定語格（의）": "所有格（의）",
+    "冠形格（의）": "所有格（의）",
+    "冠形格助詞（의）": "所有格（의）",
+  };
+
+  const GRAMMAR_KEY_TITLES = {
+    "particle:topic": "主題（은/는）",
+    "particle:subject": "主格（이/가）",
+    "particle:object": "賓格（을/를）",
+    "particle:e": "時間地點（에）",
+    "particle:eseo": "處所來源（에서）",
+    "particle:man": "限定（만）",
+    "particle:ui": "所有格（의）",
+    "particle:genitive": "所有格（의）",
+    "particle:possessive": "所有格（의）",
+    "ending:adnominal-present": "冠形詞形（-는）",
+    "ending:adnominal-adj": "冠形詞形（-ㄴ/은）",
+    "ending:adnominal-future": "未來推測（-(으)ㄹ）",
+    "ending:polite": "禮貌體（-아/어요）",
+    "ending:haeyo": "禮貌體（-아/어요）",
+    "ending:plain": "平語（해체）",
+    "ending:hamnida": "正式體（-습니다）",
+    "tense:past": "過去（-았/었-）",
+    "honorific:si": "主體敬語（-시-）",
+    "connect:go": "並列連接（-고）",
+    "connect:aseo": "原因連接（-아/어서）",
+    "connect:nde": "背景對比（-는데）",
+    "pattern:progressive": "進行（-고 있다）",
+    "pattern:negative": "否定（-지 않다）",
+    "pattern:want": "希望（-고 싶다）",
+    "pattern:ajud": "請托（-아/어 줘）",
+    "pattern:manhada": "值得（-ㄹ 만하다）",
+    "pattern:eul-su-itda": "可能（-ㄹ 수 있다）",
+    "pattern:eul-su-eopda": "不可能（-ㄹ 수 없다）",
+    "pattern:eul-geoya": "將會／打算（-(으)ㄹ 거야）",
+    "irregular:b": "ㅂ 不規則（ㅂ 불규칙）",
+    "irregular:d": "ㄷ 不規則（ㄷ 불규칙）",
+    "irregular:s": "ㅅ 不規則（ㅅ 불규칙）",
+    "irregular:reu": "르 不規則（르 불규칙）",
+    "irregular:h": "ㅎ 不規則（ㅎ 불규칙）",
+    "irregular:l": "ㄹ 脫落（ㄹ 탈락）",
+    "irregular:eu": "ㅡ 脫落（ㅡ 탈락）",
+  };
+
+  function canonicalFunctionTitles() {
+    return CANONICAL_FUNCTIONS.map((fn) => fn.title);
+  }
+
+  function catalogEntries() {
+    const list = CANONICAL_FUNCTIONS.slice();
+    const seen = new Set(list.map((x) => x.title));
+    for (const rule of rules) {
+      const title = String(rule?.title || "").trim();
+      if (!title || seen.has(title) || isSupplementaryUsage(rule)) continue;
+      const p = parseBilingualTitle(title);
+      if (!p.zh || !p.ko) continue;
+      seen.add(title);
+      list.push({ title, zh: [p.zh], ko: [p.ko], fromRule: true });
+    }
+    return list;
+  }
+
+  function titleFromKindOrKey(key) {
+    const k = String(key || "")
+      .trim()
+      .replace(/^kiwi:/i, "");
+    if (!k) return "";
+    if (GRAMMAR_KEY_TITLES[k]) return GRAMMAR_KEY_TITLES[k];
+    if (typeof KoParse !== "undefined" && KoParse.KIND_META && KoParse.KIND_META[k]) {
+      return String(KoParse.KIND_META[k].name || "").trim();
+    }
+    return "";
+  }
+
+  function koAliasHit(queryKo, aliases) {
+    if (!queryKo) return false;
+    for (const a of aliases || []) {
+      if (grammarMarkersEquivalent(queryKo, a)) return true;
+      if (normalizeGrammarKey(queryKo) === normalizeGrammarKey(a)) return true;
+    }
+    return false;
+  }
+
+  function zhAliasHit(queryZh, aliases) {
+    if (!queryZh) return false;
+    const q = shortenFunctionZh(queryZh) || queryZh;
+    for (const a of aliases || []) {
+      if (zhNamesRelated(queryZh, a) || zhNamesRelated(q, a)) return true;
+      if (normalizeToken(q) === normalizeToken(a)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 把 API／表單標題收成「功能名稱（韓語）」。
+   * 命中標準目錄則改用標準名；否則只做格式正規化，不硬套別張卡。
+   */
+  function canonicalInventoryName(raw, extra = {}) {
+    const extraZh = String(extra.nameZh || extra.zh || "").trim();
+    const extraKo = String(extra.nameKo || extra.ko || "").trim();
+    let working = String(raw || "").trim();
+    if (working && extraKo && !parseBilingualTitle(formatFunctionTitle(working)).ko) {
+      const zh = parseBilingualTitle(formatFunctionTitle(working)).zh || working;
+      working = `${zh}（${extraKo}）`;
+    } else if (!working && extraZh && extraKo) {
+      working = `${extraZh}（${extraKo}）`;
+    } else if (!working && extraZh) {
+      working = extraZh;
+    } else if (!working && extraKo) {
+      working = extraKo;
+    }
+    working = formatFunctionTitle(working);
+    if (!working && !extra.kiwiKind && !extra.grammarKey && !extra.g) return "";
+
+    const aliasHit =
+      TITLE_ALIASES[working] || TITLE_ALIASES[working.replace(/\s+/g, "")] || "";
+    if (aliasHit) return aliasHit;
+
+    const parsed = parseBilingualTitle(working);
+    let zh = extraZh || parsed.zh || "";
+    let ko = extraKo || parsed.ko || "";
+    // 裸「는／의」只有韓語標記、沒有中文功能名
+    if (looksKoreanMarker(zh) && !looksChineseFunction(zh)) {
+      if (!ko) ko = zh;
+      zh = extraZh && looksChineseFunction(extraZh) ? extraZh : "";
+    }
+
+    const fromKey =
+      titleFromKindOrKey(extra.kiwiKind) || titleFromKindOrKey(extra.grammarKey || extra.g);
+    if (fromKey) {
+      const fk = parseBilingualTitle(fromKey);
+      const related = !zh || zhNamesRelated(zh, fk.zh) || zhAliasHit(zh, [fk.zh]);
+      const fn = CANONICAL_FUNCTIONS.find((x) => x.title === fromKey);
+      const koOk = !ko || grammarMarkersEquivalent(ko, fk.ko) || (fn && koAliasHit(ko, fn.ko));
+      if (related && koOk) return fromKey;
+    }
+
+    const catalog = catalogEntries();
+    const zhHits = zh ? catalog.filter((fn) => zhAliasHit(zh, fn.zh)) : [];
+    const koHits = ko ? catalog.filter((fn) => koAliasHit(ko, fn.ko)) : [];
+
+    if (zh && ko) {
+      const both = catalog.filter((fn) => zhAliasHit(zh, fn.zh) && koAliasHit(ko, fn.ko));
+      if (both.length === 1) return both[0].title;
+      const stdBoth = both.filter((fn) => !fn.fromRule);
+      if (stdBoth.length === 1) return stdBoth[0].title;
+    }
+    if (zh && !ko && zhHits.length === 1) return zhHits[0].title;
+    if (!zh && ko && koHits.length === 1) return koHits[0].title;
+    // 韓語標記在筆記本／目錄裡獨一無二：中文怎麼寫都收成那張卡名
+    if (ko) {
+      const liveKo = catalog.filter((fn) => fn.fromRule && koAliasHit(ko, fn.ko));
+      if (liveKo.length === 1) return liveKo[0].title;
+      const stdKo = catalog.filter((fn) => !fn.fromRule && koAliasHit(ko, fn.ko));
+      if (liveKo.length === 0 && stdKo.length === 1) return stdKo[0].title;
+    }
+
+    const shortZh = shortenFunctionZh(zh) || zh;
+    if (shortZh && ko) return `${shortZh}（${ko}）`;
+    if (shortZh) return shortZh;
+    return working;
+  }
+
+  function applyCanonicalNameToItem(item) {
+    if (!item || typeof item !== "object") return item;
+    const name = canonicalInventoryName(item.name || item.title || "", {
+      nameKo: item.nameKo || item.ko,
+      nameZh: item.nameZh || item.zh,
+      grammarKey: item.grammarKey || item.g,
+      kiwiKind: item.kiwiKind,
+    });
+    if (!name) return item;
+    const p = parseBilingualTitle(name);
+    const next = { ...item, name };
+    if (p.zh) next.nameZh = p.zh;
+    if (p.ko) next.nameKo = p.ko;
+    return next;
+  }
+
   /** 解析「中文（韓語）」→ { full, zh, ko } */
   function parseBilingualTitle(title) {
-    const full = String(title || "").trim();
-    const m = full.match(/^(.+?)[（(]\s*(.+?)\s*[）)]\s*$/);
+    const full = formatFunctionTitle(title) || String(title || "").trim();
+    const m = full.match(/^(.+?)\s*[（(]\s*(.+?)\s*[）)]\s*$/);
     if (m) {
       return { full, zh: m[1].trim(), ko: m[2].trim() };
     }
@@ -767,7 +1111,9 @@ const RulesService = (() => {
   function canonicalVowelForm(raw) {
     const s = String(raw || "").trim().normalize("NFC");
     if (!s) return "";
-    if (/돼|됐|되어|되\s*[＋+]\s*어/.test(s)) return "돼";
+    // 標題／公式裡的 되＋어→돼；句中未縮約「되어」不當 돼
+    if (/되\s*[＋+]\s*어\s*→\s*돼|→\s*돼/.test(s) || /돼|됐/.test(s)) return "돼";
+    if (/되어/.test(s) && /母音|縮約|축약|＋/.test(s)) return "돼";
     // 이＋어→여（結構式或僅「여」）
     if (
       /^여$|^여요$|^여서$/.test(s) ||
@@ -1047,14 +1393,18 @@ const RulesService = (() => {
    * @returns {{ owned: boolean, rule: object|null, score: number }}
    */
   function findMatchingRule(nameOrItem) {
+    const canonItem =
+      typeof nameOrItem === "object" && nameOrItem
+        ? applyCanonicalNameToItem(nameOrItem)
+        : null;
     const name =
       typeof nameOrItem === "string"
-        ? nameOrItem
-        : nameOrItem?.name || nameOrItem?.title || "";
+        ? canonicalInventoryName(nameOrItem)
+        : canonItem?.name || nameOrItem?.name || nameOrItem?.title || "";
     const nameKo =
-      typeof nameOrItem === "object" ? nameOrItem?.nameKo || nameOrItem?.ko || "" : "";
+      typeof nameOrItem === "object" ? canonItem?.nameKo || nameOrItem?.nameKo || nameOrItem?.ko || "" : "";
     const nameZh =
-      typeof nameOrItem === "object" ? nameOrItem?.nameZh || nameOrItem?.zh || "" : "";
+      typeof nameOrItem === "object" ? canonItem?.nameZh || nameOrItem?.nameZh || nameOrItem?.zh || "" : "";
 
     const nameNorm = normalizeToken(name);
     const nameTitleKey = normalizeTitleKey(name);
@@ -1066,6 +1416,8 @@ const RulesService = (() => {
     const zhNorm = normalizeToken(zhRaw).replace(/[・·‧•･]/g, "");
     const span =
       typeof nameOrItem === "object" ? String(nameOrItem?.span || "").trim() : "";
+    const kiwiKind =
+      typeof nameOrItem === "object" ? String(nameOrItem?.kiwiKind || "").trim() : "";
 
     // 易與他卡混淆的單音節標記（一般路徑：不可單靠 1 字 ko 判已收錄）
     const AMBIGUOUS_SHORT_KO = new Set([
@@ -1140,7 +1492,7 @@ const RulesService = (() => {
     // vContr 有家族無形 → 落到一般比對（仍擋裸「母音縮約」泛稱）
 
     // ══════════════════════════════════════════
-    // 【嚴格族 2】不規則：須 ㅂ/ㄷ/ㅅ/르/ㅎ/ㅡ탈락 同種
+    // 【嚴格族 2】不規則：須 ㅂ/ㄷ/ㅅ/르/ㅎ/ㄹ탈락/ㅡ탈락 同種
     // ══════════════════════════════════════════
     const itemBlobEarly = [name, nameKo, nameZh, span].join("\n");
     const irrKind = extractIrregularKind(name, nameKo, nameZh, span, itemBlobEarly);
@@ -1181,6 +1533,7 @@ const RulesService = (() => {
     // 人稱縮約：有專卡則優先加分，不再「對不上就整項判未收錄」
     // ══════════════════════════════════════════
     const contr = detectContractionQuery(name, nameKo || parsed.ko, nameZh || parsed.zh);
+    const qFrame = inferEulFrame({ title: name, name, nameKo: koRaw, nameZh: zhRaw });
 
     const queryKeys = new Set();
     const addQ = (x) => expandAliasKeys(x).forEach((k) => queryKeys.add(k));
@@ -1216,6 +1569,16 @@ const RulesService = (() => {
 
     for (const rule of rules) {
       if (isSupplementaryUsage(rule)) continue; // 補充用法不自動句中標註
+      // Kiwi 已確定形態功能時，本地卡也必須屬於同一功能族。
+      // 避免形容詞現在冠形 -ㄴ/은 寬鬆命中過去冠形或 특정詞彙卡。
+      if (
+        kiwiKind &&
+        typeof KiwiService !== "undefined" &&
+        typeof KiwiService.ruleMatchesHint === "function" &&
+        !KiwiService.ruleMatchesHint(rule, { kind: kiwiKind })
+      ) {
+        continue;
+      }
       const rKeys = ruleMatchKeys(rule);
       let score = 0;
       const ruleIrr = ruleIrregularKind(rule);
@@ -1223,6 +1586,10 @@ const RulesService = (() => {
       const rKoKey = normalizeGrammarKey(rp.ko);
       const rTitleKey = normalizeTitleKey(rule.title);
       const rZh = normalizeToken(rp.zh).replace(/[・·‧•･]/g, "");
+      const rFrame = inferEulFrame(rule);
+      if (qFrame && rFrame && qFrame.id !== rFrame.id) score -= 40;
+      else if (qFrame && !rFrame) score -= 28;
+      else if (!qFrame && rFrame) score -= 28;
 
       // —— 標題全等／正規化全等 ——
       if (nameNorm && normalizeToken(rule.title) === nameNorm) {
@@ -1341,7 +1708,7 @@ const RulesService = (() => {
       for (const q of queryKeys) {
         if (!q) continue;
         if (/^(不規則|불규칙|irregular)$/i.test(q)) continue;
-        const isShort = q.length <= 1 && !/^[ㅡ으ㅂㄷㅅㅎ]$/.test(q);
+        const isShort = q.length <= 1 && !/^[ㅡ으ㅂㄷㅅㅎㄹ]$/.test(q);
         if (rKeys.has(q)) {
           // 人稱縮約形（난 等）完全命中鍵 → 略高於一般短字
           if (contr?.form && q === contr.form) {
@@ -1392,6 +1759,405 @@ const RulesService = (() => {
       return { owned: true, rule: best, score: bestScore };
     }
     return { owned: false, rule: null, score: bestScore };
+  }
+
+  /**
+   * 非文法類的純韓語詞彙卡，必須在原句中真的出現該詞，不能只信 API 座標。
+   * 例：不同的（다른）不可因 붉은 也帶冠形語尾就算命中。
+   */
+  function ruleHasLiteralSurfaceWitness(rule, text) {
+    if (!rule) return false;
+    const src = String(text || "").normalize("NFC");
+    const category = String(rule.category || "").trim();
+    const grammarCategories = new Set(["語尾", "助詞", "不規則", "時態", "敬語", "連接", "句型"]);
+    if (grammarCategories.has(category)) return true;
+    const ko = String(parseBilingualTitle(rule.title).ko || "")
+      .trim()
+      .normalize("NFC")
+      .replace(/\s+/g, "");
+    // 只有完整的純韓語詞（至少兩音節）才套字面見證；公式／語素標記另走形態閘門。
+    if (!/^[\uAC00-\uD7A3]{2,}$/.test(ko)) return true;
+    return src.replace(/\s+/g, "").includes(ko);
+  }
+
+  function markerAltParts(raw) {
+    const g = normalizeGrammarKey(raw);
+    if (!g) return [];
+    return g
+      .split("/")
+      .map((p) => normalizeGrammarKey(p))
+      .filter(Boolean);
+  }
+
+  function grammarMarkersEquivalent(a, b) {
+    const ak = normalizeGrammarKey(a);
+    const bk = normalizeGrammarKey(b);
+    if (!ak || !bk) return false;
+    if (ak === bk) return true;
+    const aa = expandOptionalEuKeys(ak);
+    const bb = expandOptionalEuKeys(bk);
+    for (const k of aa) {
+      if (bb.has(k)) return true;
+    }
+    const ap = markerAltParts(ak);
+    const bp = markerAltParts(bk);
+    if (!ap.length || !bp.length) return false;
+    // 는 ⊂ 은/는、가 ⊂ 이/가、를 ⊂ 을/를（單側對上斜線擇一）
+    if (ap.length === 1 && bp.includes(ap[0])) return true;
+    if (bp.length === 1 && ap.includes(bp[0])) return true;
+    if (ap.length > 1 && bp.length > 1) {
+      const as = [...ap].sort().join("\0");
+      const bs = [...bp].sort().join("\0");
+      if (as === bs) return true;
+    }
+    return false;
+  }
+
+  function inventoryCategoriesCompatible(a, b) {
+    const x = String(a || "").trim();
+    const y = String(b || "").trim();
+    if (!x || !y || x === "其他" || y === "其他") return true;
+    if (x === y) return true;
+    const endingFamily = new Set(["語尾", "時態", "敬語", "連接"]);
+    return endingFamily.has(x) && endingFamily.has(y);
+  }
+
+  function tokenBaseTag(tok) {
+    return String(tok?.tag || "").split(/[-+]/)[0];
+  }
+
+  function tokenFormOf(tok) {
+    return String(tok?.form || tok?.str || tok?.word || "").normalize("NFC");
+  }
+
+  /**
+   * 從標題／盤點項抽出「句中必須見到」的形態證據。
+   * 沒有這層證據就不能把本地卡當已收錄上色（名稱對上不夠）。
+   */
+  function requiredMarkerSpec(rule, item) {
+    const title = String(rule?.title || item?.name || item?.title || "");
+    const ko = String(
+      (rule && parseBilingualTitle(rule.title).ko) ||
+        item?.nameKo ||
+        parseBilingualTitle(title).ko ||
+        ""
+    );
+    const blob = `${title}\n${ko}\n${item?.name || ""}`;
+    if (/ㅎ\s*不規則|ㅎ\s*불규칙/.test(blob)) return { kind: "irr-h" };
+    if (/禮貌|해요體|해요체/.test(title) && /아\s*\/\s*어/.test(blob)) return { kind: "haeyo" };
+    if ((/平語|해체|반말/.test(title) || /해체|반말/.test(ko)) && !/해요|습니다/.test(title)) {
+      return { kind: "haeche" };
+    }
+    if (/지\s*못|못\s*하/.test(blob) && /否定|못/.test(blob)) return { kind: "neg-mot" };
+    if (/[（(]\s*안\s*[）)]/.test(title) && /簡略|短形|否定/.test(blob)) return { kind: "neg-an" };
+    if ((/使役/.test(title) && /게/.test(ko)) || /게\s*하/.test(blob)) return { kind: "causative-ge" };
+    if (/이야/.test(ko) && /敘述|指定|이야/.test(blob)) return { kind: "iya" };
+    if (/未來推測|未來冠形/.test(title) && /\(으\)ㄹ|을\s*\/\s*ㄹ/.test(blob)) return { kind: "etm-l" };
+    if (/所有格/.test(title) && /의/.test(ko)) return { kind: "ui" };
+    if (/賓格/.test(title) && /을/.test(ko)) return { kind: "jko" };
+    if (/主題/.test(title) && /은/.test(ko)) return { kind: "topic" };
+    if (/지\s*않/.test(blob) && !/못/.test(blob)) return { kind: "neg-ji" };
+    return null;
+  }
+
+  /**
+   * @returns {'hit'|'miss'|'none'}
+   */
+  function morphWitness(src, item, rule, tokens) {
+    const spec = requiredMarkerSpec(rule, item);
+    if (!spec) return "none";
+    const text = String(src || "").normalize("NFC");
+    const compact = text.replace(/\s+/g, "");
+    const list = Array.isArray(tokens) ? tokens : [];
+    const hasTok = list.length > 0;
+
+    if (spec.kind === "neg-mot") return compact.includes("못") ? "hit" : "miss";
+    if (spec.kind === "causative-ge") return compact.includes("게") ? "hit" : "miss";
+    if (spec.kind === "iya") return compact.includes("이야") ? "hit" : "miss";
+    if (spec.kind === "neg-ji") return /않|치\s*않|치않/.test(compact) ? "hit" : "miss";
+    if (spec.kind === "haeyo") {
+      return /해요|[아어여]요/.test(compact) ? "hit" : "miss";
+    }
+    if (spec.kind === "haeche") {
+      const hasPlainHae = /해(?!요)/.test(compact);
+      const hasPlainAeo = /[아어여](?!요)/.test(compact);
+      if (hasPlainHae || hasPlainAeo) return "hit";
+      return "miss";
+    }
+    if (spec.kind === "neg-an") {
+      if (hasTok && list.some((t) => tokenFormOf(t) === "안" && /^(MAG|MAJ)$/.test(tokenBaseTag(t)))) {
+        return "hit";
+      }
+      if (/(^|[\s])안([\s]|$)/.test(text)) return "hit";
+      return "miss";
+    }
+    if (spec.kind === "irr-h") {
+      if (typeof StemDrop === "undefined" || typeof StemDrop.classifyStemDrop !== "function") {
+        return "none";
+      }
+      for (const t of list) {
+        const lemma = String(t.lemma || t.form || t.str || "");
+        const surface = String(t.word || t.form || t.str || "");
+        const drop = StemDrop.classifyStemDrop(lemma, surface);
+        if (drop && drop.kind === "ㅎ" && !/하$/.test(String(drop.lemma || ""))) return "hit";
+      }
+      return hasTok ? "miss" : "none";
+    }
+    if (spec.kind === "etm-l") {
+      if (hasTok) {
+        const etm = list.some(
+          (t) => tokenBaseTag(t) === "ETM" && /^(ㄹ|을)$/.test(tokenFormOf(t))
+        );
+        if (etm) return "hit";
+        return "miss";
+      }
+      // 인 걸／는 걸 是 것을／句末感嘆，不是未來冠形 -(으)ㄹ
+      if (/[인은는]\s*걸/.test(text)) return "miss";
+      return "none";
+    }
+    if (spec.kind === "ui") {
+      if (compact.includes("의")) return "hit";
+      if (hasTok && list.some((t) => /^(의|내|네|제)$/.test(tokenFormOf(t)))) return "hit";
+      if (/(^|\s)(내|네|제)(\s|$)/.test(text)) return "hit";
+      return "miss";
+    }
+    if (spec.kind === "jko") {
+      if (hasTok && list.some((t) => tokenBaseTag(t) === "JKO")) return "hit";
+      if (/을|를/.test(compact)) return "hit";
+      if (/걸|날|널|절/.test(compact)) return "hit";
+      return "miss";
+    }
+    if (spec.kind === "topic") {
+      if (
+        hasTok &&
+        list.some((t) => {
+          const tag = tokenBaseTag(t);
+          const form = tokenFormOf(t);
+          if (tag === "JX" && /^(은|는|ㄴ)$/.test(form)) return true;
+          if ((tag === "MAG" || tag === "MAJ" || tag === "NNG" || tag === "NP" || tag === "NNP") && /[은는]$/.test(form)) {
+            return true;
+          }
+          return false;
+        })
+      ) {
+        return "hit";
+      }
+      if (/은|는/.test(compact)) return "hit";
+      return "miss";
+    }
+    return "none";
+  }
+
+  /**
+   * API 盤點專用的本地卡對照。
+   * 有 Kiwi 種類時以形態身分為準；名稱只在沒有形態鍵時用來對卡。
+   * 命中後以本地卡標題為準。
+   */
+  function findInventoryRule(item) {
+    if (!item || typeof item !== "object") return findMatchingRule(item);
+    item = applyCanonicalNameToItem(item);
+    const name = String(item.name || item.title || "").trim();
+    const parsed = parseBilingualTitle(name);
+    const qZh = String(item.nameZh || item.zh || parsed.zh || "").trim();
+    const qKo = String(item.nameKo || item.ko || parsed.ko || "").trim();
+    const qCat = String(item.category || "").trim();
+    const qTitleKey = normalizeTitleKey(name);
+    const grammarKey = String(item.grammarKey || item.g || "").trim();
+    const kiwiKind = String(
+      item.kiwiKind || (grammarKey.startsWith("kiwi:") ? grammarKey.slice(5) : "")
+    ).trim();
+
+    const hintCompatible = (rule) => {
+      if (!kiwiKind) return true;
+      if (
+        typeof KiwiService === "undefined" ||
+        typeof KiwiService.ruleMatchesHint !== "function"
+      ) {
+        return true;
+      }
+      return KiwiService.ruleMatchesHint(rule, { kind: kiwiKind });
+    };
+
+    const pool = rules.filter((rule) => !isSupplementaryUsage(rule));
+
+    // 0) 形態種類：種子卡或唯一 hint 命中優先於中文別名。
+    if (kiwiKind) {
+      const seedId =
+        typeof KiwiService !== "undefined" && typeof KiwiService.seedIdForKind === "function"
+          ? KiwiService.seedIdForKind(kiwiKind)
+          : "";
+      if (seedId) {
+        const seedRule = pool.find((rule) => rule.id === seedId);
+        if (seedRule) return { owned: true, rule: seedRule, score: 96, strict: true };
+      }
+      const wantTitle = titleFromKindOrKey(kiwiKind);
+      if (wantTitle) {
+        const canonWant = canonicalInventoryName(wantTitle);
+        const byCanon = pool.filter((rule) => {
+          const rt = String(rule.title || "").trim();
+          if (normalizeTitleKey(rt) === normalizeTitleKey(wantTitle)) return true;
+          const aliased = TITLE_ALIASES[rt] || TITLE_ALIASES[rt.replace(/\s+/g, "")] || "";
+          if (aliased === canonWant || aliased === wantTitle) return true;
+          return false;
+        });
+        if (byCanon.length === 1) {
+          return { owned: true, rule: byCanon[0], score: 95, strict: true };
+        }
+        if (byCanon.length > 1) {
+          const hintedCanon = byCanon.filter(hintCompatible);
+          const pick = hintedCanon.length === 1 ? hintedCanon[0] : byCanon[0];
+          return { owned: true, rule: pick, score: 95, strict: true };
+        }
+      }
+      const hinted = pool.filter(hintCompatible);
+      if (hinted.length === 1) {
+        return { owned: true, rule: hinted[0], score: 94, strict: true };
+      }
+      if (hinted.length > 1 && qZh) {
+        const hintedZh = hinted.filter((rule) => {
+          const rZh = String(parseBilingualTitle(rule.title).zh || "").trim();
+          return rZh && zhNamesRelated(qZh, rZh);
+        });
+        if (hintedZh.length === 1) {
+          return { owned: true, rule: hintedZh[0], score: 93, strict: true };
+        }
+      }
+    }
+
+    // 1) 完整標題相同（形態種類衝突時不可收下錯卡）。
+    const exact = pool.find((rule) => {
+      const rKey = normalizeTitleKey(rule.title);
+      if (qTitleKey && rKey && qTitleKey === rKey) return true;
+      return Boolean(name && canonicalInventoryName(rule.title) === name);
+    });
+    if (exact) {
+      if (!kiwiKind || hintCompatible(exact)) {
+        return { owned: true, rule: exact, score: 100, strict: true };
+      }
+      // hint 可能因說明提到「冠形／縮約」誤殺；僅當 Kiwi 種類的標準名就是這張卡才收下
+      const kindTitle = titleFromKindOrKey(kiwiKind);
+      if (kindTitle && canonicalInventoryName(exact.title) === canonicalInventoryName(kindTitle)) {
+        return { owned: true, rule: exact, score: 100, strict: true };
+      }
+    }
+
+    const markerPool = qKo
+      ? pool.filter((rule) => {
+          const rp = parseBilingualTitle(rule.title);
+          if (!grammarMarkersEquivalent(qKo, rp.ko)) return false;
+          if (!inventoryCategoriesCompatible(qCat, rule.category)) return false;
+          if (kiwiKind && !hintCompatible(rule)) return false;
+          return true;
+        })
+      : [];
+
+    // 2a) 此標記在筆記本裡只有一張卡 → 中文叫什麼都算同一條。
+    if (markerPool.length === 1) {
+      return { owned: true, rule: markerPool[0], score: 88, strict: true };
+    }
+
+    // 2b) 同標記多張：中文功能名優先；Kiwi 種類只做消歧。
+    if (markerPool.length > 1) {
+      const zhMatches = markerPool.filter((rule) => {
+        const rZh = String(parseBilingualTitle(rule.title).zh || "").trim();
+        return Boolean(qZh && rZh && zhNamesRelated(qZh, rZh));
+      });
+      if (zhMatches.length === 1) {
+        return { owned: true, rule: zhMatches[0], score: 90, strict: true };
+      }
+      const zhExactPool = (zhMatches.length ? zhMatches : markerPool).filter((rule) => {
+        const rZh = parseBilingualTitle(rule.title).zh;
+        return normalizeToken(rZh) === normalizeToken(qZh);
+      });
+      if (zhExactPool.length === 1) {
+        return { owned: true, rule: zhExactPool[0], score: 92, strict: true };
+      }
+      if (kiwiKind) {
+        const hinted = markerPool.filter(hintCompatible);
+        if (hinted.length === 1) {
+          return { owned: true, rule: hinted[0], score: 90, strict: true };
+        }
+        const hintedZh = hinted.filter((rule) => {
+          const rZh = String(parseBilingualTitle(rule.title).zh || "").trim();
+          return Boolean(qZh && rZh && zhNamesRelated(qZh, rZh));
+        });
+        if (hintedZh.length === 1) {
+          return { owned: true, rule: hintedZh[0], score: 91, strict: true };
+        }
+      }
+      return { owned: false, rule: null, score: 0, strict: true, ambiguous: true };
+    }
+
+    // 3) Kiwi 高信心種類只對到唯一一張卡時，可視為穩定對照。
+    if (kiwiKind) {
+      const hinted = pool.filter(hintCompatible);
+      if (hinted.length === 1) {
+        return { owned: true, rule: hinted[0], score: 80, strict: true };
+      }
+    }
+
+    return { owned: false, rule: null, score: 0, strict: true };
+  }
+
+  /**
+   * 把 API 盤點項掛到筆記本既有卡（韓語標記／標題）。
+   * 不掃整本灌卡；只綁這次盤點已經列出的項目。
+   */
+  function attachLocalRulesToInventory(query, inventory) {
+    const inv = inventory && typeof inventory === "object" ? { ...inventory } : { items: [] };
+    const items = Array.isArray(inv.items) ? inv.items.map((it) => (it && typeof it === "object" ? { ...it } : it)) : [];
+    const kept = [];
+
+    for (const it of items) {
+      if (!it || typeof it !== "object") continue;
+      if (it.manualRuleId && getById(it.manualRuleId)) {
+        const rule = getById(it.manualRuleId);
+        it.name = rule.title;
+        const p = parseBilingualTitle(rule.title);
+        if (p.zh) it.nameZh = p.zh;
+        if (p.ko) it.nameKo = p.ko;
+        if (isSupplementaryUsage(rule)) it.category = rule.category;
+        kept.push(it);
+        continue;
+      }
+      if (it.localRuleId && getById(it.localRuleId)) {
+        const rule = getById(it.localRuleId);
+        it.name = rule.title;
+        const p = parseBilingualTitle(rule.title);
+        if (p.zh) it.nameZh = p.zh;
+        if (p.ko) it.nameKo = p.ko;
+        if (!it.category) it.category = rule.category;
+        kept.push(it);
+        continue;
+      }
+      if (isSupplementaryUsage(it) || isSupplementaryUsage(it.category)) {
+        kept.push(it);
+        continue;
+      }
+      const match = findInventoryRule(it);
+      const witness = morphWitness(query, it, match?.rule, inv.tokens);
+      if (
+        witness === "miss" &&
+        it.source !== "manual" &&
+        !it.locatedManually &&
+        it.source !== "surface-hint"
+      ) {
+        continue;
+      }
+      if (match?.owned && match.rule) {
+        it.localRuleId = match.rule.id;
+        it.localAttached = true;
+        it.name = match.rule.title;
+        const p = parseBilingualTitle(match.rule.title);
+        if (p.zh) it.nameZh = p.zh;
+        if (p.ko) it.nameKo = p.ko;
+        if (!it.category) it.category = match.rule.category;
+      }
+      kept.push(it);
+    }
+
+    inv.items = kept;
+    return inv;
   }
 
   /**
@@ -1506,7 +2272,7 @@ const RulesService = (() => {
     // 後備：片段內含該系結果字（했어요、속삭여줘）
     if (fam === "hae" && /해|했|하여/.test(s) && !/^여|여요|여서|여줘/.test(s)) return true;
     if (fam === "yeo" && /여/.test(s) && !/해|했|하여|하\s*[＋+]/.test(s)) return true;
-    if (fam === "dwae" && /돼|됐|되어/.test(s)) return true;
+    if (fam === "dwae" && /돼|됐/.test(s)) return true;
 
     return false;
   }
@@ -1603,10 +2369,19 @@ const RulesService = (() => {
     // 命令／請托 -아/어 주다：標題常寫「-아/어 줘」抽象式，句中是 줘／주세요
     const blob = [rule.title, rule.structure, rule.explanation || ""].join("\n");
     if (
-      /命令|請托|拜托|아\s*\/\s*어\s*주|어\s*주|아\s*주|주다|給我|請.?給|benefact/i.test(blob) ||
+      /命令|請托|拜托|아\s*\/\s*어\s*주|어\s*주|아\s*주|給我|請.?給|benefact/i.test(blob) ||
       /줘|주세요|줘요/.test(blob)
     ) {
       ["줘", "줘요", "주세요", "주셔", "해 줘", "해줘"].forEach((s) => needles.add(s));
+    }
+    if (isFutureEulRule(rule)) {
+      needles.add("을");
+    }
+    if (typeof AffixGate !== "undefined" && AffixGate.inferProfile && AffixGate.HONORIFIC_FUSED) {
+      const prof = AffixGate.inferProfile(rule);
+      if (prof && prof.role === "honorific-si") {
+        AffixGate.HONORIFIC_FUSED.forEach((s) => needles.add(s));
+      }
     }
     return [...needles].filter((n) => isUsableNeedle(n));
   }
@@ -1778,12 +2553,15 @@ const RulesService = (() => {
    */
   function ruleNeunSense(rule) {
     if (!rule) return null;
+    const title = String(rule.title || "");
+    // 標題優先：說明裡常互提「冠形／主題」會誤判對方
+    if (/主題/.test(title) || (rule.category === "助詞" && /은\s*\/\s*는|은\/는/.test(title))) {
+      return "topic";
+    }
+    if (/冠形|관형|定語/.test(title)) return "adnominal";
     const blob = [rule.title, rule.category, rule.explanation, rule.structure].join("\n");
-    // 冠形（定語）形：동사의 관형사형 -는
-    if (/冠形|관형|定語形|修飾形|adnominal|attributive/i.test(blob)) return "adnominal";
     if (/主題助詞|화제\s*조사|topic\s*particle/i.test(blob)) return "topic";
-    if (rule.category === "助詞" && /은\s*\/\s*는|은\/는/.test(rule.title)) return "topic";
-    // 標題韓語段為單純 -는 且分類為語尾／活用 → 冠形
+    if (/冠形|관형|定語形|修飾形|adnominal|attributive/i.test(blob)) return "adnominal";
     const ko = parseBilingualTitle(rule.title).ko;
     if (/^-?는$/.test(ko.replace(/\s/g, "")) && /語尾|活用|連接/.test(rule.category || "")) {
       return "adnominal";
@@ -1791,22 +2569,67 @@ const RulesService = (() => {
     return null;
   }
 
+  const ADN_HEAD_RE =
+    /^(사람|것|거|때|곳|날|집|분|중|듯|수|줄|편|말|일|길|쪽|책|영화|음식|친구|학생|소식|이야기|문제|방법|이유|동안|사이|만큼|쪽|방향|기분|소리|모습|점|부분|경우|옷|색|맛|방|물|밥|차|꽃|나무|하늘|마음)/;
+  const PRED_ADV_RE =
+    /^(안|못|잘|진짜|정말|매우|아주|너무|더|덜|좀|또|그냥|바로|이미|아직|항상|자주|가끔|다|전부|모두|별로|전혀|왜|어떻게|언제|어디|누가|뭘|무엇)/;
+
   /**
-   * 判斷句中某個「는」比較像主題助詞還是冠形詞形
+   * 判斷句中某個「은／는」：主題助詞 vs 冠形
    * @returns {'topic'|'adnominal'|'unknown'}
    */
-  function classifyNeunAt(src, start, end) {
+  function classifyEunNeunAt(src, start, end) {
     const surface = src.slice(start, end);
-    if (surface !== "는") return "unknown";
+    const isNeun = surface === "는";
+    const isEun = surface === "은";
+    if (!isNeun && !isEun) return "unknown";
 
     const stem = hangulStemBefore(src, start);
     const after = src.slice(end);
     const afterTrim = after.replace(/^\s+/, "");
 
-    // —— 強特徵：主題 ——
-    // 人稱／指示代詞 + 는
+    const NP_HOST =
+      /^(나|너|저|우리|너희|저희|당신|이것|그것|저것|그거|이거|저거|여기|거기|저기|이곳|그곳|저곳|이번|오늘|내일|어제|지금|누구|무엇|어디|언제)$/;
+    const FUSION_ADV_HOST =
+      /^(더|다시|이제|지금|아직|절대|항상|언제나|조금|모두|가끔|늘|자주|전혀|별로|아무|오늘|내일|어제|이번|다음|처음|나중|평소|원래|사실|보통|일단|우선|먼저|특히|정말|진짜|그냥|역시|오히려|어차피|분명히|매일|방금|금방|당장|곧|이미|혼자|함께|따로|계속)$/;
+    const ADJ_STEM =
+      /^(좋|싫|많|적|작|크|길|짧|높|낮|넓|좁|쉽|어렵|예쁘|아름답|어둡|밝|붉|노랗|파랗|하얗|검|새롭|오래|아프|맑|바쁘|맛있|재미있)$/;
+
+    if (NP_HOST.test(stem)) return "topic";
+    if (FUSION_ADV_HOST.test(stem)) return "topic";
+
+    if (isEun) {
+      if (ADJ_STEM.test(stem) || /없$/.test(stem) || /싶$/.test(stem)) {
+        if (
+          !afterTrim ||
+          ADN_HEAD_RE.test(afterTrim) ||
+          (afterTrim && isHangulSyllable(afterTrim[0]) && !PRED_ADV_RE.test(afterTrim))
+        ) {
+          return "adnominal";
+        }
+      }
+      if (PRED_ADV_RE.test(afterTrim)) return "topic";
+      if (ADN_HEAD_RE.test(afterTrim) && (ADJ_STEM.test(stem) || stem.length === 1 || /싶$/.test(stem))) {
+        return "adnominal";
+      }
+      // 싶은 꿈、먹은 밥：用言＋은＋名詞＝冠形
+      if (
+        afterTrim &&
+        isHangulSyllable(afterTrim[0]) &&
+        !PRED_ADV_RE.test(afterTrim) &&
+        (/싶$/.test(stem) || ADJ_STEM.test(stem) || /^(먹|갈|온|한|된|진|둔|든|높|힘들)/.test(stem))
+      ) {
+        return "adnominal";
+      }
+      if (stem.length >= 2 && !ADJ_STEM.test(stem) && !/하$/.test(stem) && !/싶$/.test(stem)) {
+        return "topic";
+      }
+      if (stem.length === 1 && ADJ_STEM.test(stem)) return "adnominal";
+      return "topic";
+    }
+
+    // 는：以下沿用原 classifyNeunAt 邏輯
     if (/^(나|너|저|우리|너희|저희|당신)$/.test(stem)) return "topic";
-    // 這／那＋는（이것+은 較多，但 그건／난 等縮約另議）
     if (/^(그것|이것|저것|그거|이거|저거|여기|거기|저기)$/.test(stem)) return "topic";
 
     // 冠形後常見中心語（사람／것／때…）
@@ -1862,6 +2685,11 @@ const RulesService = (() => {
     return "unknown";
   }
 
+  function classifyNeunAt(src, start, end) {
+    if (src.slice(start, end) !== "는") return "unknown";
+    return classifyEunNeunAt(src, start, end);
+  }
+
   /**
    * 以「이／가」等結尾、但不是主格助詞的固定詞／副詞
    * 例：듯이 的 이 ≠ 主格 이
@@ -1887,11 +2715,132 @@ const RulesService = (() => {
       "확실히",
     ],
     가: [],
-    // 만：連接／數量詞內的 만，不是「只有」助詞
-    만: ["다만", "하지만", "천만", "백만", "일만", "수만", "얼마만"],
+    // 만：連接／數量／詞幹本身以 만 結尾，不是「只有」助詞
+    만: [
+      "다만",
+      "하지만",
+      "천만",
+      "백만",
+      "일만",
+      "수만",
+      "얼마만",
+      "교만",
+      "오만",
+      "거만",
+      "태만",
+      "충만",
+      "낭만",
+      "기만",
+      "불만",
+      "원만",
+      "조만",
+    ],
     // 도：部分副詞／連接不是「也」
     도: ["그래도", "하도"],
   };
+
+  /** 助詞後面還可再疊的語素（만의／만은／만을／너만요） */
+  const PARTICLE_STACK_AFTER = [
+    "에서",
+    "으로",
+    "한테",
+    "에게",
+    "부터",
+    "까지",
+    "처럼",
+    "보다",
+    "을",
+    "를",
+    "은",
+    "는",
+    "이",
+    "가",
+    "의",
+    "와",
+    "과",
+    "도",
+    "에",
+    "로",
+    "께",
+    "요",
+    "죠",
+  ];
+
+  function stripParticleStack(s) {
+    let rest = String(s || "");
+    let changed = true;
+    while (changed && rest) {
+      changed = false;
+      for (const p of PARTICLE_STACK_AFTER) {
+        if (rest.startsWith(p)) {
+          rest = rest.slice(p.length);
+          changed = true;
+          break;
+        }
+      }
+    }
+    return rest;
+  }
+
+  /** 아／어 後面還可接的語尾串（아요、어서、어줘…）；아직／어두울래 不是 */
+  const AEO_ENDING_STACK = [
+    "주세요",
+    "세요",
+    "어요",
+    "아요",
+    "여요",
+    "어서",
+    "아서",
+    "여서",
+    "어도",
+    "아도",
+    "어야",
+    "아야",
+    "아라",
+    "어라",
+    "어봐",
+    "아봐",
+    "어줘",
+    "아줘",
+    "요",
+    "죠",
+    "서",
+    "도",
+    "야",
+    "라",
+    "봐",
+    "줘",
+    "지",
+    "네",
+    "게",
+  ];
+
+  function leftoverIsAeoEndingStack(s) {
+    let rest = String(s || "");
+    let changed = true;
+    while (changed && rest) {
+      changed = false;
+      for (const p of AEO_ENDING_STACK) {
+        if (rest.startsWith(p)) {
+          rest = rest.slice(p.length);
+          changed = true;
+          break;
+        }
+      }
+    }
+    return rest === "";
+  }
+
+  /** 아직·아침·어두울래：아／어 在詞內，不是語尾 -아/어 */
+  function isAeoInsideLexeme(src, start, end) {
+    let left = start;
+    while (left > 0 && isHangulSyllable(src[left - 1])) left--;
+    let right = end;
+    while (right < src.length && isHangulSyllable(src[right])) right++;
+    const leftover = src.slice(end, right);
+    if (!leftover) return false;
+    return !leftoverIsAeoEndingStack(leftover);
+  }
 
   function isLexicalNotParticle(src, start, end, particle) {
     const p = String(particle || "").normalize("NFC");
@@ -1923,9 +2872,18 @@ const RulesService = (() => {
       return false; // 細分交由 classifyNeunAt
     }
 
-    // —— 만／도：黏在體詞後；句首孤字不像助詞 ——
+    // 내／네／제：所有格縮約。내가／네가／제가 是主格，不是 의。
+    if ((p === "내" || p === "네" || p === "제") && src[end] === "가") {
+      return true;
+    }
+
+    // —— 만／도：黏在體詞後；詞首孤字／詞中（가만히）不是助詞 ——
     if (p === "만" || p === "도") {
       if (start <= left) return true;
+      if (end < right) {
+        const leftover = stripParticleStack(src.slice(end, right));
+        if (leftover) return true;
+      }
       return false;
     }
 
@@ -1982,10 +2940,33 @@ const RulesService = (() => {
         if (isLexicalNotParticle(src, loc.start, loc.end, n)) return false;
       }
 
-      if (n === "는" && sense) {
-        const role = classifyNeunAt(src, loc.start, loc.end);
-        if (role === "unknown") return sense === "topic";
-        return role === sense;
+      // 에 是 에서 的首音節時，不是時間地點（에）
+      if (n === "에" && src.slice(loc.start, loc.start + 2) === "에서") {
+        const title = String(rule?.title || "");
+        if (!/에서/.test(title)) return false;
+      }
+
+      if ((n === "는" || n === "은") && sense) {
+        const role = classifyEunNeunAt(src, loc.start, loc.end);
+        if (sense === "topic") {
+          if (n === "은" || n === "는") {
+            let right = loc.end;
+            while (right < src.length && isHangulSyllable(src[right])) right++;
+            if (loc.end < right) {
+              const leftover = stripParticleStack(src.slice(loc.end, right));
+              if (leftover) return false;
+            }
+          }
+          if (role === "unknown") return n === "는";
+          return role === "topic";
+        }
+        if (sense === "adnominal") {
+          if (role === "unknown") return false;
+          return role === "adnominal";
+        }
+      }
+      if (n.length === 1 && /^(아|어|여)$/.test(n) && isAeoInsideLexeme(src, loc.start, loc.end)) {
+        return false;
       }
       return true;
     });
@@ -2062,6 +3043,291 @@ const RulesService = (() => {
     return out;
   }
 
+  /** 音節是否有 ㄹ 받침（갈·줄 的 -(으)ㄹ，不是獨立字 을） */
+  function hasRieulBatchim(ch) {
+    const c = String(ch || "");
+    if (!c || c.length < 1) return false;
+    const code = c.charCodeAt(0);
+    if (code < 0xac00 || code > 0xd7a3) return false;
+    return (code - 0xac00) % 28 === 8; // ㄹ
+  }
+
+  function isReuIrregularRule(rule) {
+    if (!rule) return false;
+    if (rule.id === "seed-reu-irregular") return true;
+    return extractIrregularKind(rule.title, rule.structure, rule.explanation, rule.category) === "르";
+  }
+
+  /** 르 불규칙 第二音節：라／러，或過去融合 랐／렀 */
+  function isReuSecondSyllable(ch) {
+    if (typeof StemDrop !== "undefined" && StemDrop.isReuSecondSyllable) {
+      return StemDrop.isReuSecondSyllable(ch);
+    }
+    const d = decomposeHangul(ch);
+    if (!d || d.cho !== 5) return false;
+    if (d.jung !== 0 && d.jung !== 4) return false;
+    return d.jong === 0 || d.jong === 20;
+  }
+
+  /** 몰라／빨라（ㄹ받침＋라／러）或 푸르러／이르러（르＋러／라） */
+  function isReuIrregularPair(a, b) {
+    if (typeof StemDrop !== "undefined" && StemDrop.isReuIrregularPair) {
+      return StemDrop.isReuIrregularPair(a, b);
+    }
+    if (hasRieulBatchim(a) && isReuSecondSyllable(b)) return true;
+    if (a === "르" && isReuSecondSyllable(b)) return true;
+    return false;
+  }
+
+  function hasReuIrregularSurface(text) {
+    if (typeof StemDrop !== "undefined" && StemDrop.hasReuIrregularSurface) {
+      return StemDrop.hasReuIrregularSurface(text);
+    }
+    const syls = [...String(text || "").normalize("NFC")].filter(isHangulSyllable);
+    for (let i = 0; i < syls.length - 1; i++) {
+      if (isReuIrregularPair(syls[i], syls[i + 1])) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 選取可能只有 라요；用前後一音節看整句是否為 몰라／빨라
+   */
+  function hasReuIrregularInSelection(sel, opts) {
+    if (hasReuIrregularSurface(sel)) return true;
+    const ctx = String(opts?.contextText || "").normalize("NFC");
+    const s = Number(opts?.spanStart);
+    const e = Number(opts?.spanEnd);
+    if (!ctx || !Number.isFinite(s) || !Number.isFinite(e) || e <= s) return false;
+    const win = ctx.slice(Math.max(0, s - 1), Math.min(ctx.length, e + 1));
+    return hasReuIrregularSurface(win);
+  }
+
+  function locateReuIrregularSurface(text) {
+    const src = String(text || "").normalize("NFC");
+    const hits = [];
+    const seen = new Set();
+    for (let i = 0; i < src.length - 1; i++) {
+      if (!isHangulSyllable(src[i]) || !isHangulSyllable(src[i + 1])) continue;
+      if (!isReuIrregularPair(src[i], src[i + 1])) continue;
+      const start = src[i] === "르" && i > 0 && isHangulSyllable(src[i - 1]) ? i - 1 : i;
+      const key = `${start}-${i + 2}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({
+        start,
+        end: i + 2,
+        text: src.slice(start, i + 2),
+        needle: "르→ㄹㄹ",
+      });
+    }
+    return hits;
+  }
+
+  /**
+   * -(으)ㄹ 後接句型：ㄹ 本身不夠，必須有句中後接表面。
+   * 볼 수 없게 ≠ ㄹ 거야；갈 거야 ≠ ㄹ 수 없다。
+   */
+  const EUL_FRAMES = [
+    {
+      id: "geoya",
+      detect: /거야|거예요|거에요|거다|겁니다|것이다|것이에요|것이야/,
+      surfaces: [
+        "거야",
+        "거예요",
+        "거에요",
+        "거다",
+        "겁니다",
+        "것이다",
+        "것이에요",
+        "것이야",
+        "거였",
+        "것이었",
+      ],
+    },
+    {
+      id: "su-eob",
+      detect: /수\s*없|不可能/,
+      surfaces: ["수 없", "수없", "수 없다", "수없다", "수 없어요", "수 없습니다"],
+    },
+    {
+      id: "su-it",
+      detect: /수\s*있|可能/,
+      surfaces: ["수 있", "수있", "수 있다", "수있다", "수 있어요", "수 있습니다"],
+    },
+    {
+      id: "manhada",
+      detect: /만하|만해|ㄹ\s*만|을\s*만|值得/,
+      surfaces: ["만하", "만해", "만했", "만하다", "만해요"],
+    },
+    {
+      id: "jul",
+      detect: /줄\s*알|줄\s*모르/,
+      surfaces: ["줄 알", "줄 모르", "줄알", "줄모르"],
+    },
+    {
+      id: "geol",
+      detect: /을걸|ㄹ걸|ㄹ\s*걸/,
+      surfaces: ["을걸", "ㄹ걸", "을 걸", "ㄹ 걸"],
+    },
+  ];
+
+  function compactHangul(s) {
+    return String(s || "")
+      .normalize("NFC")
+      .replace(/\s+/g, "");
+  }
+
+  function inferEulFrame(ruleOrItem) {
+    if (!ruleOrItem) return null;
+    const title = String(ruleOrItem.title || ruleOrItem.name || "");
+    const ko = String(
+      ruleOrItem.nameKo ||
+        (typeof parseBilingualTitle === "function"
+          ? parseBilingualTitle(title).ko
+          : "") ||
+        ""
+    );
+    // 句型身分只看標題／韓語標記／結構；說明中的反例或延伸例
+    // （如「할 줄 알다 不是本語尾」）不可反過來把本卡分類成該句型。
+    const blob = [title, ko, ruleOrItem.structure, ruleOrItem.category]
+      .map((x) => String(x || ""))
+      .join("\n");
+    for (const fr of EUL_FRAMES) {
+      if (fr.id === "su-it" && /수\s*없|不可能/.test(blob)) continue;
+      if (fr.id === "manhada" && /未來|推測|冠形/.test(title) && !/만하/.test(title + ko)) {
+        continue;
+      }
+      if (fr.detect.test(blob)) return fr;
+    }
+    return null;
+  }
+
+  function sentenceHasEulFrame(src, frame) {
+    if (!frame || !frame.surfaces || !frame.surfaces.length) return true;
+    const hay = compactHangul(src);
+    if (!hay) return false;
+    return frame.surfaces.some((s) => hay.includes(compactHangul(s)));
+  }
+
+  function eulFrameWitness(src, ruleOrItem) {
+    const frame = inferEulFrame(ruleOrItem);
+    if (!frame) return "na";
+    return sentenceHasEulFrame(src, frame) ? "hit" : "miss";
+  }
+
+  function isBoundEulFrame(ruleOrItem) {
+    return Boolean(inferEulFrame(ruleOrItem));
+  }
+
+  /** 未來／推測冠形 -(으)ㄹ；排除 ㄹ 탈락、만하다、ㄹ 거야、ㄹ 수 있다/없다 */
+  function isFutureEulRule(rule) {
+    if (!rule) return false;
+    const title = String(rule.title || "");
+    if (/ㄹ\s*탈락|ㄹ\s*脫落/.test(title)) return false;
+    if (inferEulFrame(rule)) return false;
+    if (/만하/.test(title) && !/未來|推測/.test(title)) return false;
+    if (/未來推測|未來冠形|推測冠形/.test(title)) return true;
+    if (/\(으\)ㄹ|-을\s*\/\s*ㄹ|-을\/ㄹ/.test(title) && /未來|推測|冠形|관형|定語/.test(title)) {
+      return true;
+    }
+    return /未來|推測/.test(title) && /\(으\)ㄹ|을\s*\/\s*ㄹ|-ㄹ/.test(title);
+  }
+
+  /**
+   * 冠形／未來 -(으)ㄹ 定位：을 獨立音節 或 末字 ㄹ받침
+   * 例：먹을→을；갈／줄→末音節（batchim ㄹ）
+   */
+  function locateAdnominalLEul(text, item) {
+    const src = String(text || "");
+    const hits = [];
+    const seen = new Set();
+    const push = (start, end, needle) => {
+      if (start < 0 || end <= start || end > src.length) return;
+      const k = start + "-" + end;
+      if (seen.has(k)) return;
+      seen.add(k);
+      hits.push({
+        start,
+        end,
+        text: src.slice(start, end),
+        needle: needle || src.slice(start, end),
+      });
+    };
+
+    const spanHint = String(item?.span || "").trim().normalize("NFC");
+    function addFromSurface(surface, baseIdx) {
+      if (!surface || baseIdx < 0) return;
+      const last = surface[surface.length - 1];
+      const lastStart = baseIdx + surface.length - 1;
+      const lastEnd = baseIdx + surface.length;
+      if (last === "을") {
+        push(lastStart, lastEnd, "을");
+      } else if (hasRieulBatchim(last)) {
+        push(lastStart, lastEnd, "ㄹ");
+      } else if (/[\uAC00-\uD7A3]/.test(surface)) {
+        push(baseIdx, baseIdx + surface.length, surface);
+      }
+    }
+
+    if (spanHint && src.includes(spanHint)) {
+      let from = 0;
+      while (from < src.length) {
+        const idx = src.indexOf(spanHint, from);
+        if (idx < 0) break;
+        addFromSurface(spanHint, idx);
+        from = idx + Math.max(1, spanHint.length);
+      }
+    }
+
+    for (const loc of locateNeedle(src, "을")) {
+      const beforeOk = loc.start > 0 && isHangulSyllable(src[loc.start - 1]);
+      if (!beforeOk) continue;
+      push(loc.start, loc.end, "을");
+    }
+
+    const ADN_HEAD =
+      /^(사람|것|거|때|곳|날|집|분|중|듯|수|줄|편|말|일|길|쪽|책|영화|음식|친구|학생|소식|이야기|문제|방법|이유|동안|사이|기분|소리|모습|점|부분|경우|옷|색|맛|방|물|밥|차|꽃|나무|하늘|마음)/;
+    let i = 0;
+    while (i < src.length) {
+      if (!isHangulSyllable(src[i])) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < src.length && isHangulSyllable(src[j])) j++;
+      const word = src.slice(i, j);
+      const last = word[word.length - 1];
+      const after = src.slice(j).replace(/^\s+/, "");
+      const afterC = after.replace(/\s+/g, "");
+      // ㄹ 已被後接句型吃掉：볼 수 없／갈 거야／갈 만하
+      if (
+        /^수(없|있)/.test(afterC) ||
+        /^(거야|거예요|거에요|거다|겁니다|것이다|것이에요|것이야)/.test(afterC) ||
+        /^만하/.test(afterC) ||
+        /^(을걸|ㄹ걸)/.test(afterC)
+      ) {
+        i = j;
+        continue;
+      }
+      const looksAdn = ADN_HEAD.test(after);
+      if (looksAdn && hasRieulBatchim(last)) {
+        push(j - 1, j, "ㄹ");
+      }
+      i = j;
+    }
+
+    if (spanHint && src.includes(spanHint)) {
+      const s0 = src.indexOf(spanHint);
+      const s1 = s0 + spanHint.length;
+      const inside = hits.filter((h) => h.start >= s0 && h.end <= s1);
+      if (inside.length) return inside;
+      const near = hits.filter((h) => h.start >= s0 && h.start <= s1 + 1);
+      if (near.length) return near;
+    }
+    return hits;
+  }
+
   /** 音節是否有 ㄴ 받침（예쁜·큰 的 -ㄴ 冠形，不是獨立字 은） */
   function hasNieunBatchim(ch) {
     const c = String(ch || "");
@@ -2096,11 +3362,9 @@ const RulesService = (() => {
     // 1) 獨立音節 은（작은、좋은）— 排除主題助詞語境可選寬鬆
     for (const loc of locateNeedle(src, "은")) {
       if (isLexicalNotParticle(src, loc.start, loc.end, "은")) continue;
-      // 冠形 은 前應有詞幹；後常接名詞
-      const after = src.slice(loc.end).replace(/^\s+/, "");
       const beforeOk = loc.start > 0 && isHangulSyllable(src[loc.start - 1]);
       if (!beforeOk) continue;
-      // 若像主題（은 後直接是動詞敘述且前是體詞）仍可能誤中；有 span 時再篩
+      if (classifyEunNeunAt(src, loc.start, loc.end) === "topic") continue;
       push(loc.start, loc.end, "은");
     }
 
@@ -2151,7 +3415,9 @@ const RulesService = (() => {
       const looksAdn = !after || ADN_HEAD.test(after) || (after && isHangulSyllable(after[0]));
       if (looksAdn && word.length >= 1) {
         if (last === "은" && word.length >= 2) {
-          push(j - 1, j, "은");
+          if (classifyEunNeunAt(src, j - 1, j) !== "topic") {
+            push(j - 1, j, "은");
+          }
         } else if (hasNieunBatchim(last)) {
           // 큰 사람（單音節+ㄴ받침）或 예쁜；有中心語／span 時才標
           if (
@@ -2183,13 +3449,30 @@ const RulesService = (() => {
     const t = rule?.title || "";
     const joined = `${b}\n${t}`;
     if (/賓格|을\s*\/\s*를|을\/를/.test(joined) || ruleIsObjectParticle(rule)) {
-      return ["를", "을"];
+      return ["를", "을", "걸"];
+    }
+    if (/所有格/.test(joined) && /[（(]\s*의\s*[）)]/.test(joined + (rule?.title || ""))) {
+      return ["의", "내", "네", "제"];
     }
     if (/主格|이\s*\/\s*가|이\/가/.test(joined) || ruleIsSubjectParticle(rule)) {
       return ["이", "가"];
     }
     if (/主題助詞|은\s*\/\s*는|은\/는/.test(joined) || (/主題/.test(t) && /助詞/.test(joined))) {
       return ["은", "는"];
+    }
+    // 未來／推測冠形 -(으)ㄹ（갈／줄／먹을）；勿與 ㄹ 탈락、賓格 을 混
+    if (
+      isFutureEulRule(rule) ||
+      isFutureEulRule({ title: String(item?.name || t || "") })
+    ) {
+      return ["을", "ㄹ"];
+    }
+    // 過去回想冠形 -던：不要被泛稱「冠形」改去搜 은/는/ㄴ
+    if (
+      /[（(]\s*-?던\s*[）)]/.test(joined) ||
+      (/던/.test(joined) && /回想|회상|過去冠形|관형/.test(joined))
+    ) {
+      return ["던"];
     }
     // 冠形：動詞 -는 vs 形容詞 -ㄴ/은 分開
     if (/冠形|관형|定語|adnominal|attributive/i.test(joined)) {
@@ -2221,7 +3504,7 @@ const RulesService = (() => {
     ) {
       return ["도"];
     }
-    if (/所有格|所有助詞|[（(]\s*의\s*[）)]|助詞（의）/.test(joined)) {
+    if (/所有格|所有助詞|定語助詞|定語格|屬格|冠形格|[（(]\s*의\s*[）)]|助詞（의）/.test(joined)) {
       return ["의"];
     }
     if (/[（(]\s*에\s*\/\s*에서\s*[）)]|에\/에서|處所助詞/.test(joined)) {
@@ -2388,7 +3671,7 @@ const RulesService = (() => {
    * 助詞／冠形類：優先標在 은·를·만 等語素上，避免標整段 치마／너
    * @returns {{ start, end, text, needle }[]}
    */
-  function locateApiItemInText(src, item) {
+  function locateApiItemInTextRaw(src, item) {
     const text = String(src || "");
     if (!text || !item) return [];
 
@@ -2452,10 +3735,30 @@ const RulesService = (() => {
       noteRuns.filter((r) => r.length >= 2 && r.length <= 6).forEach((r) => candidates.add(r));
     }
 
-    const owned = findMatchingRule(item);
+    const owned = findInventoryRule(item);
     if (owned.owned && owned.rule) {
       const rk = parseBilingualTitle(owned.rule.title);
       addCand(rk.ko, { preferred: true });
+    }
+
+    // -(으)ㄹ 後接句型：只能標 거야／수 없 等後接，禁止拿 ㄹ／을 冒充
+    const eulFrame = inferEulFrame(owned.rule || item);
+    if (eulFrame && eulFrame.surfaces && eulFrame.surfaces.length) {
+      if (!sentenceHasEulFrame(text, eulFrame)) return [];
+      const frameHits = [];
+      for (const needle of eulFrame.surfaces) {
+        if (!needle) continue;
+        let locs = locateNeedle(text, needle);
+        if (!locs.length && /\s/.test(needle)) {
+          locs = locateNeedle(text, needle.replace(/\s+/g, ""));
+        }
+        for (const l of locs) frameHits.push({ ...l, needle: l.needle || needle });
+      }
+      if (frameHits.length) {
+        const picked = pickHitsNearSpan(text, frameHits, item.span);
+        return picked.length ? picked : frameHits;
+      }
+      return [];
     }
 
     // ㅡ 탈락：句中沒有 ㅡ，禁止用 jamo 當 needle；只靠 span／融合音節
@@ -2561,6 +3864,30 @@ const RulesService = (() => {
       }
       // 母音縮約：句中無合法表面 → 不標記
       return [];
+    }
+
+    // 0--) 르 不規則：句中是 몰라／빨라／불렀，找不到字面 르
+    if (
+      isReuIrregularRule(owned.rule || ruleForLoc) ||
+      extractIrregularKind(item.name, item.nameKo, item.nameZh, item.span) === "르"
+    ) {
+      const reuHits = locateReuIrregularSurface(text);
+      if (reuHits.length) {
+        const picked = pickHitsNearSpan(text, reuHits, item.span);
+        if (picked.length) return picked;
+        return reuHits;
+      }
+    }
+
+    // 0-) 未來／冠形 -(으)ㄹ：含 ㄹ받침（갈／줄）與獨立 을（먹을）
+    const isAdnLEul = isFutureEulRule(owned.rule || ruleForLoc);
+    if (isAdnLEul) {
+      const eulHits = locateAdnominalLEul(text, item);
+      if (eulHits.length) {
+        const picked = pickHitsNearSpan(text, eulHits, item.span);
+        if (picked.length) return picked;
+        return eulHits;
+      }
     }
 
     // 0) 冠形 -ㄴ/은：含 ㄴ받침（예쁜）與獨立 은（작은）
@@ -2782,8 +4109,8 @@ const RulesService = (() => {
       }
     }
 
-    // 8) 해요體常見表面
-    if (/해요|아\s*\/\s*어|아\/어/.test(blob)) {
+    // 8) 해요體常見表面（必須真有 요；禁止把 해 當成禮貌體）
+    if (/해요|아\s*\/\s*어요|아요\/어요/.test(blob) && /禮貌|해요體|해요체/.test(blob)) {
       for (const needle of ["해요", "예요", "이에요", "아요", "어요", "여요", "세요"]) {
         if (text.includes(needle)) {
           return locateNeedle(text, needle).map((l) => ({ ...l, needle }));
@@ -2791,7 +4118,72 @@ const RulesService = (() => {
       }
     }
 
+    // 8b) 平語／해체：해（하＋여）或詞尾 아／어／여
+    if (/平語|해체|반말/.test(blob) && !/해요體|禮貌/.test(blob)) {
+      for (const needle of ["해", "어", "아", "여"]) {
+        if (!text.includes(needle)) continue;
+        const locs = locateNeedle(text, needle).filter((l) => {
+          const next = text[l.end] || "";
+          if (needle !== "해" && next === "요") return false;
+          return true;
+        });
+        if (locs.length) return locs.map((l) => ({ ...l, needle }));
+      }
+    }
+
     return [];
+  }
+
+  function dropFalseParticleLocs(src, locs, rule, item) {
+    const title = String(rule?.title || item?.name || "");
+    const text = String(src || "");
+    return (locs || []).filter((loc) => {
+      const n = text.slice(loc.start, loc.end);
+      if (n === "에" && text.slice(loc.start, loc.start + 2) === "에서" && !/에서/.test(title)) {
+        return false;
+      }
+      if (n === "에서" && /時間地點/.test(title) && !/에서/.test(title)) return false;
+      if ((n === "은" || n === "는") && ruleNeunSense(rule || { title }) === "topic") {
+        if (classifyEunNeunAt(text, loc.start, loc.end) !== "topic") return false;
+      }
+      return true;
+    });
+  }
+
+  function locateApiItemInText(src, item, tokens) {
+    let locs = locateApiItemInTextRaw(src, item);
+    if (item && (item.source === "manual" || item.locatedManually)) return locs;
+    const owned = findInventoryRule(item);
+    if (locs.length) {
+      locs = dropFalseParticleLocs(src, locs, owned.rule, item);
+    }
+    if (typeof AffixGate !== "undefined" && AffixGate.filterLocs && locs.length) {
+      locs = AffixGate.filterLocs(String(src || ""), locs, owned.rule || null, {
+        item,
+        tokens,
+      });
+    }
+    // Kiwi 已給精確區間（던/ETM、이/JKC）時，搜針被閘掉仍用該區間
+    if (!locs.length) {
+      const a = Number(item?.start);
+      const b = Number(item?.end);
+      if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+        const loc = {
+          start: a,
+          end: b,
+          text: String(src || "").slice(a, b),
+          needle: item.span || String(src || "").slice(a, b),
+        };
+        if (typeof AffixGate === "undefined" || !AffixGate.filterLocs) return [loc];
+        const gated = AffixGate.filterLocs(String(src || ""), [loc], owned.rule || null, {
+          item,
+          tokens,
+        });
+        if (gated.length) return gated;
+      }
+      return [];
+    }
+    return locs;
   }
 
   /**
@@ -2918,6 +4310,9 @@ const RulesService = (() => {
           locs.push(f);
         }
       }
+    }
+    if (typeof AffixGate !== "undefined" && AffixGate.filterLocs) {
+      locs = AffixGate.filterLocs(src, locs, rule, { needle });
     }
     return locs;
   }
@@ -3063,6 +4458,22 @@ const RulesService = (() => {
         }
       }
       // 過去規則：無 았/었 關鍵字時仍補融合 span
+      if (isReuIrregularRule(rule)) {
+        for (const loc of locateReuIrregularSurface(src)) {
+          const key = `${loc.start}-${loc.end}-${rule.id}`;
+          if (seenSpan.has(key)) continue;
+          seenSpan.add(key);
+          spans.push({
+            start: loc.start,
+            end: loc.end,
+            text: loc.text,
+            ruleId: rule.id,
+            ruleTitle: rule.title,
+            needle: loc.needle || "르→ㄹㄹ",
+            fusionNote: "",
+          });
+        }
+      }
       if (ruleWantsPastFusion(rule)) {
         for (const loc of fusionLocsForRule(src, rule)) {
           const key = `${loc.start}-${loc.end}-${rule.id}`;
@@ -3123,6 +4534,46 @@ const RulesService = (() => {
     });
   }
 
+  function isLimitManParticleRule(rule) {
+    if (!rule) return false;
+    const blob = [rule.title, rule.structure, rule.explanation || "", rule.category].join("\n");
+    if (/만하|만해|ㄹ\s*만하/.test(rule.title || "")) return false;
+    if (/[（(]\s*만\s*[）)]/.test(rule.title || "") && /限定|한정|只有|助詞|조사/.test(blob)) {
+      return true;
+    }
+    return /限定助詞|한정\s*조사|只有（만）|助詞（만）/.test(blob);
+  }
+
+  /** 만 落在某筆實詞字彙內部（가만히）或整詞就是該字彙（교만）→ 不當助詞 */
+  function particleInsideVocabLexeme(src, start, end, vocabLocs) {
+    if (!Array.isArray(vocabLocs) || !vocabLocs.length) return false;
+    const s0 = Number(start);
+    const e0 = Number(end);
+    if (!Number.isFinite(s0) || !Number.isFinite(e0) || e0 <= s0) return false;
+    let left = s0;
+    while (left > 0 && isHangulSyllable(src[left - 1])) left--;
+    let right = e0;
+    while (right < src.length && isHangulSyllable(src[right])) right++;
+    for (const v of vocabLocs) {
+      const vs = Number(v.start);
+      const ve = Number(v.end);
+      if (!Number.isFinite(vs) || !Number.isFinite(ve) || ve <= vs) continue;
+      if (vs < s0 && e0 < ve) return true;
+      if (vs === left && ve === right && right - left > e0 - s0) return true;
+    }
+    return false;
+  }
+
+  function filterHitsAgainstVocab(src, hits, rule, vocabLocs) {
+    const list = Array.isArray(hits) ? hits : [];
+    if (!list.length || !Array.isArray(vocabLocs) || !vocabLocs.length) return list;
+    const checkMan = isLimitManParticleRule(rule);
+    const checkDo =
+      /[（(]\s*도\s*[）)]/.test(rule?.title || "") || /助詞（도）|也（도）/.test(rule?.title || "");
+    if (!checkMan && !checkDo) return list;
+    return list.filter((h) => !particleInsideVocabLexeme(src, h.start, h.end, vocabLocs));
+  }
+
   /** 是否為「命令／請托（-아/어 줘）」類規則 */
   function isAjueoJudaRule(rule) {
     if (!rule) return false;
@@ -3173,7 +4624,7 @@ const RulesService = (() => {
           const r = getById(it.manualRuleId);
           if (isAjueoJudaRule(r)) return true;
         }
-        const m = findMatchingRule(it);
+        const m = findInventoryRule(it);
         if (m.owned && isAjueoJudaRule(m.rule)) return true;
         const blob = [it?.name, it?.nameZh, it?.nameKo, it?.title].join("\n");
         if (/請托|아\s*\/\s*어\s*줘|아\/어\s*줘|주세요|주실래요|아\s*\/\s*어\s*주/i.test(blob)) {
@@ -3207,14 +4658,201 @@ const RulesService = (() => {
       }
     }
 
+    // 르 불규칙：API／Kiwi 常只標 해요體（라요），句中 몰라／빨라 仍應掛卡
+    const reuHits = locateReuIrregularSurface(src);
+    if (reuHits.length) {
+      const alreadyReu = items.some((it) => {
+        if (it?.manualRuleId) {
+          const r = getById(it.manualRuleId);
+          if (isReuIrregularRule(r)) return true;
+        }
+        return extractIrregularKind(it?.name, it?.nameKo, it?.nameZh, it?.title) === "르";
+      });
+      if (!alreadyReu) {
+        const rule = getAll().find((r) => isReuIrregularRule(r)) || getById("seed-reu-irregular");
+        const title = rule?.title || "르 不規則（르 불규칙）";
+        const p = parseBilingualTitle(title);
+        for (const hit of reuHits) {
+          const row = {
+            name: title,
+            nameZh: p.zh || "르 不規則",
+            nameKo: p.ko || "르 불규칙",
+            category: rule?.category || "不規則",
+            span: hit.text,
+            start: hit.start,
+            end: hit.end,
+            confidence: "high",
+            source: "surface-hint",
+          };
+          if (rule?.id) row.manualRuleId = rule.id;
+          items.push(row);
+        }
+      }
+    }
+
+    const fusedTopics =
+      typeof KiwiService !== "undefined" && typeof KiwiService.fusedTopicSurfaces === "function"
+        ? KiwiService.fusedTopicSurfaces()
+        : [
+            { host: "더", particle: "는", surface: "더는" },
+            { host: "다시", particle: "는", surface: "다시는" },
+            { host: "이제", particle: "는", surface: "이제는" },
+            { host: "아직", particle: "은", surface: "아직은" },
+            { host: "지금", particle: "은", surface: "지금은" },
+          ];
+
+    function topicItemCovers(it, pStart, pEnd, particle, surface) {
+      if (!it) return false;
+      const a = Number(it.start);
+      const b = Number(it.end);
+      const hasCoords = Number.isFinite(a) && Number.isFinite(b) && b > a;
+      const overlap = hasCoords && a < pEnd && b > pStart;
+      if (it.kiwiKind === "jx-topic" && overlap) return true;
+      const blob = [it?.name, it?.nameZh, it?.nameKo, it?.title].join("\n");
+      if (!/主題/.test(blob)) return false;
+      if (overlap) return true;
+      const sp = String(it.span || "");
+      if (!(sp === particle || sp === surface)) return false;
+      // 只有「沒座標的同 span」才當成同一處，避免兩處 는 被併成一筆
+      return !hasCoords;
+    }
+
+    function ensureTopicHint(pStart, pEnd, particle, surface) {
+      const existing = items.find((it) => topicItemCovers(it, pStart, pEnd, particle, surface));
+      if (existing) {
+        const a = Number(existing.start);
+        const b = Number(existing.end);
+        if (!(Number.isFinite(a) && Number.isFinite(b) && a === pStart && b === pEnd)) {
+          existing.start = pStart;
+          existing.end = pEnd;
+          existing.span = particle;
+          existing.kiwiKind = existing.kiwiKind || "jx-topic";
+        }
+        return;
+      }
+      const rule =
+        getById("seed-topic") ||
+        getAll().find(
+          (r) => !isSupplementaryUsage(r) && canonicalInventoryName(r.title) === "主題（은/는）"
+        ) ||
+        null;
+      const title = rule?.title || "主題（은/는）";
+      const p = parseBilingualTitle(title);
+      const row = {
+        name: title,
+        nameZh: p.zh || "主題",
+        nameKo: p.ko || "은/는",
+        category: rule?.category || "助詞",
+        span: particle,
+        start: pStart,
+        end: pEnd,
+        confidence: "high",
+        source: "surface-hint",
+        kiwiKind: "jx-topic",
+      };
+      if (rule?.id) row.manualRuleId = rule.id;
+      items.push(row);
+    }
+
+    for (const ft of fusedTopics) {
+      let from = 0;
+      while (from < src.length) {
+        const idx = src.indexOf(ft.surface, from);
+        if (idx < 0) break;
+        const pStart = idx + ft.host.length;
+        const pEnd = pStart + ft.particle.length;
+        ensureTopicHint(pStart, pEnd, ft.particle, ft.surface);
+        from = idx + Math.max(1, ft.surface.length);
+      }
+    }
+
+    // 句中實際主題 은/는（움직임은、이곳은）：API 漏報時補上
+    for (const particle of ["는", "은"]) {
+      let from = 0;
+      while (from < src.length) {
+        const idx = src.indexOf(particle, from);
+        if (idx < 0) break;
+        const pEnd = idx + particle.length;
+        if (
+          !isLexicalNotParticle(src, idx, pEnd, particle) &&
+          classifyEunNeunAt(src, idx, pEnd) === "topic"
+        ) {
+          ensureTopicHint(idx, pEnd, particle, src.slice(Math.max(0, idx - 6), pEnd));
+        }
+        from = idx + 1;
+      }
+    }
+
+    const contractionHints = [
+      { needle: "난", id: "seed-topic-contraction-nan", title: "人稱主題縮約（난）", kind: "topic" },
+      { needle: "넌", id: "seed-topic-contraction-neon", title: "人稱主題縮約（넌）", kind: "topic" },
+      { needle: "전", id: "seed-topic-contraction-jeon", title: "人稱主題縮約（전）", kind: "topic" },
+      { needle: "날", id: "seed-object-contraction-nal", title: "人稱賓格縮約（날）", kind: "object" },
+      { needle: "널", id: "seed-object-contraction-neol", title: "人稱賓格縮約（널）", kind: "object" },
+      { needle: "절", id: "seed-object-contraction-jeol", title: "人稱賓格縮約（절）", kind: "object" },
+    ];
+    for (const hint of contractionHints) {
+      const re = new RegExp(`(^|[^\\uAC00-\\uD7A3])${hint.needle}([^\\uAC00-\\uD7A3]|$)`);
+      const m = src.match(re);
+      if (!m) continue;
+      const start = src.indexOf(hint.needle);
+      if (start < 0) continue;
+      const already = items.some((it) => {
+        if (it?.manualRuleId === hint.id) return true;
+        const blob = [it?.name, it?.nameKo, it?.span].join("\n");
+        if (blob.includes(hint.needle) && /縮約|주제|主題|賓格/.test(blob)) return true;
+        const owned = findInventoryRule(it);
+        return owned.owned && owned.rule?.id === hint.id;
+      });
+      if (already) continue;
+      const rule = getById(hint.id);
+      const title = rule?.title || hint.title;
+      const p = parseBilingualTitle(title);
+      const row = {
+        name: title,
+        nameZh: p.zh || (hint.kind === "object" ? "人稱賓格縮約" : "人稱主題縮約"),
+        nameKo: p.ko || hint.needle,
+        category: rule?.category || "助詞",
+        span: hint.needle,
+        start,
+        end: start + hint.needle.length,
+        confidence: "high",
+        source: "surface-hint",
+      };
+      if (rule?.id) row.manualRuleId = rule.id;
+      items.push(row);
+    }
+
     return {
+      ...inv,
       summary: inv.summary || "",
       translation: inv.translation || "",
-      items,
+      items: dropMissingEulFrames(src, items),
       vocab: Array.isArray(inv.vocab) ? inv.vocab : [],
       mode: inv.mode,
       source: inv.source,
     };
+  }
+
+  /** 句中沒有 거야／수 없 等後接時，丟掉對應的 ㄹ 複合卡（手動套用除外） */
+  function dropMissingEulFrames(src, items) {
+    const list = Array.isArray(items) ? items : [];
+    return list.filter((it) => {
+      if (!it) return false;
+      if (it.source === "manual" || it.locatedManually) return true;
+      const owned = findInventoryRule(it);
+      const frame = inferEulFrame(owned.rule || it);
+      if (frame) return sentenceHasEulFrame(src, frame);
+      const asFuture = owned.rule || { title: it.name || "" };
+      if (isFutureEulRule(asFuture)) {
+        const hay = compactHangul(src);
+        if (/수(없|있)/.test(hay) || /거야|거예요|거다|것입니다/.test(hay)) {
+          const locs = locateAdnominalLEul(src, it);
+          if (!locs.length) return false;
+        }
+      }
+      return true;
+    });
   }
 
   /**
@@ -3266,8 +4904,50 @@ const RulesService = (() => {
         reason: "詞尾 ㄴ받침 → 冠形 -ㄴ/은",
       });
     }
+    // 可見 -을（먹을）；ㄹ받침 只在 Kiwi 未分析時當後備（避免 줄 名詞誤推）
+    if (lastCh === "을") {
+      surfaceBoosts.push({
+        test: (r) => isFutureEulRule(r),
+        score: 24,
+        reason: "詞尾 을 → 未來／冠形 -(으)ㄹ",
+      });
+    } else if (lastCh && hasRieulBatchim(lastCh) && !opts.kiwiAnalyzed) {
+      surfaceBoosts.push({
+        test: (r) => isFutureEulRule(r),
+        score: 22,
+        reason: "詞尾 ㄹ받침 → 未來／冠形 -(으)ㄹ",
+      });
+    }
+    const reuInSel = hasReuIrregularInSelection(sel, opts);
+    if (reuInSel) {
+      surfaceBoosts.push({
+        test: (r) => isReuIrregularRule(r),
+        score: 26,
+        reason: "表面 ㄹ＋라／러 → 르 不規則",
+      });
+    }
 
     const kiwiHints = Array.isArray(opts.kiwiHints) ? opts.kiwiHints : [];
+    const kiwiIrrDetected = new Set();
+    if (opts.kiwiAnalyzed) {
+      const hintMap =
+        typeof StemDrop !== "undefined" && StemDrop.HINT_TO_KIND
+          ? StemDrop.HINT_TO_KIND
+          : {
+              "irr-b": "ㅂ",
+              "irr-d": "ㄷ",
+              "irr-s": "ㅅ",
+              "irr-reu": "르",
+              "irr-h": "ㅎ",
+              "l-del": "ㄹ",
+              "eu-del": "eu",
+            };
+      for (const hint of kiwiHints) {
+        const k = hintMap[hint.kind];
+        if (k) kiwiIrrDetected.add(k);
+      }
+      if (reuInSel) kiwiIrrDetected.add("르");
+    }
 
     // 常見單／雙字助詞、語尾
     const PARTICLE_HINTS = [
@@ -3306,6 +4986,33 @@ const RulesService = (() => {
     // searchLocal 當基底（整段 sel 當 query）
     const localHits = searchLocal(sel);
     const localById = new Map(localHits.map((h) => [h.rule.id, h]));
+
+    function manHitIsLexicalInContext() {
+      const ctx = String(opts.contextText || "").normalize("NFC");
+      const s = Number(opts.spanStart);
+      const e = Number(opts.spanEnd);
+      if (ctx && Number.isFinite(s) && Number.isFinite(e) && e > s) {
+        const slice = ctx.slice(s, e);
+        let from = 0;
+        while (from < slice.length) {
+          const i = slice.indexOf("만", from);
+          if (i < 0) break;
+          if (isLexicalNotParticle(ctx, s + i, s + i + 1, "만")) return true;
+          from = i + 1;
+        }
+      }
+      if (sel && sel.includes("만") && sel !== "만") {
+        let from = 0;
+        while (from < sel.length) {
+          const i = sel.indexOf("만", from);
+          if (i < 0) break;
+          if (isLexicalNotParticle(sel, i, i + 1, "만")) return true;
+          from = i + 1;
+        }
+      }
+      return false;
+    }
+    const manLexicalInSel = manHitIsLexicalInContext();
 
     // findMatchingRule 把選取當文法名
     const asNameMatch = findMatchingRule({
@@ -3385,6 +5092,25 @@ const RulesService = (() => {
         }
       }
 
+      // Kiwi 已比過原形：只保留實際脫落的那一種；規則活用與其他種類壓下去
+      if (opts.kiwiAnalyzed) {
+        const rk = ruleIrregularKind(rule);
+        if (rk === "generic") {
+          score -= 20;
+          reasons.push("不規則須點名種類");
+        } else if (rk && !kiwiIrrDetected.has(rk)) {
+          score -= 24;
+          reasons.push("原形無此脫落");
+        }
+      }
+
+      if (isLimitManParticleRule(rule) && opts.kiwiAnalyzed && !kiwiHints.some((h) => h.kind === "jx-man")) {
+        if (sel === "만" || (sel.length >= 2 && sel.includes("만") && sel !== "만하다" && !manLexicalInSel)) {
+          score -= 20;
+          reasons.push("語素不是助詞 만");
+        }
+      }
+
       // 結構式零件
       if (rule.structure && sel.length >= 1) {
         const parts = String(rule.structure).split(/[＋+\s→／|,，()（）]+/);
@@ -3392,6 +5118,18 @@ const RulesService = (() => {
           score += 8;
           reasons.push("結構式含此標記");
         }
+      }
+
+      if (isLimitManParticleRule(rule) && manLexicalInSel) {
+        score = 0;
+        reasons.push("만 在詞中，非限定助詞");
+      }
+
+      const eulFr = inferEulFrame(rule);
+      const ctxForFrame = String(opts.contextText || sel || "");
+      if (eulFr && ctxForFrame && !sentenceHasEulFrame(ctxForFrame, eulFr)) {
+        score = 0;
+        reasons.push("句中沒有此 ㄹ 後接（거야／수 없…）");
       }
 
       if (score > 0) {
@@ -3459,7 +5197,13 @@ const RulesService = (() => {
     parseStructureBranches,
     parseStructureChain,
     parseBilingualTitle,
+    formatFunctionTitle,
+    canonicalInventoryName,
+    applyCanonicalNameToItem,
+    canonicalFunctionTitles,
     findMatchingRule,
+    findInventoryRule,
+    attachLocalRulesToInventory,
     searchLocal,
     scanSentence,
     locateNeedle,
@@ -3471,9 +5215,30 @@ const RulesService = (() => {
     extractVowelContractionForm,
     enrichInventoryWithSurfaceHints,
     isAjueoJudaRule,
+    isLimitManParticleRule,
+    isLexicalNotParticle,
+    particleInsideVocabLexeme,
+    filterHitsAgainstVocab,
     rankRulesForSpan,
+    classifyStemDrop:
+      typeof StemDrop !== "undefined" ? StemDrop.classifyStemDrop : () => null,
     classifyNeunAt,
+    classifyEunNeunAt,
+    isAeoInsideLexeme,
     ruleNeunSense,
+    isFutureEulRule,
+    inferEulFrame,
+    sentenceHasEulFrame,
+    morphWitness,
+    requiredMarkerSpec,
+    eulFrameWitness,
+    isBoundEulFrame,
+    dropMissingEulFrames,
+    hasRieulBatchim,
+    isReuIrregularRule,
+    hasReuIrregularSurface,
+    hasReuIrregularInSelection,
+    locateReuIrregularSurface,
     findPastSsFusions,
     ruleWantsPastFusion,
     decomposeHangul,
@@ -3484,6 +5249,7 @@ const RulesService = (() => {
     normalizeToken,
     normalizeGrammarKey,
     normalizeTitleKey,
+    ruleHasLiteralSurfaceWitness,
     zhNamesRelated,
   };
 })();
