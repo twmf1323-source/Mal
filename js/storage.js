@@ -19,6 +19,8 @@ const Storage = (() => {
   const VOCAB_BANK_KEY = "kgn_vocab_bank_v1";
   const VOCAB_BANK_MAX = 5000;
   const VOCAB_BANK_FIELDS = ["surface", "lemma", "gloss", "pos"];
+  /** 換句連按時合併寫入，避免每次 structuredClone 整包專案 */
+  const PROJECTS_FLUSH_MS = 400;
 
   /** 文法結構可視化配色（與 CSS data-structure-theme 對應） */
   const STRUCTURE_THEMES = [
@@ -1330,10 +1332,20 @@ const Storage = (() => {
     return bank;
   }
 
+  let vocabBankCache = null;
+
+  function emptyVocabBank() {
+    return { bySurface: {}, byLemma: {} };
+  }
+
   function loadVocabBank() {
+    if (vocabBankCache) return vocabBankCache;
     try {
       const raw = localStorage.getItem(VOCAB_BANK_KEY);
-      if (!raw) return { bySurface: {}, byLemma: {} };
+      if (!raw) {
+        vocabBankCache = emptyVocabBank();
+        return vocabBankCache;
+      }
       const parsed = JSON.parse(raw);
       const bySurface =
         parsed?.bySurface && typeof parsed.bySurface === "object"
@@ -1345,9 +1357,11 @@ const Storage = (() => {
       if (Object.keys(bySurface).length && !Object.keys(byLemma).length) {
         rebuildLemmaIndex(bank);
       }
+      vocabBankCache = bank;
       return bank;
     } catch {
-      return { bySurface: {}, byLemma: {} };
+      vocabBankCache = emptyVocabBank();
+      return vocabBankCache;
     }
   }
 
@@ -1371,6 +1385,7 @@ const Storage = (() => {
       bySurface: bank?.bySurface && typeof bank.bySurface === "object" ? bank.bySurface : {},
       byLemma: bank?.byLemma && typeof bank.byLemma === "object" ? bank.byLemma : {},
     });
+    vocabBankCache = next;
     localStorage.setItem(VOCAB_BANK_KEY, JSON.stringify(next));
     return next;
   }
@@ -1505,7 +1520,7 @@ const Storage = (() => {
     }
 
     const out = list.map(enrich);
-    if (src) {
+    if (src && !opts.enrichOnly) {
       const keys = Object.keys(bySurface)
         .filter((k) => {
           if (seen.has(k)) return false;
@@ -2053,7 +2068,7 @@ const Storage = (() => {
     projectsFlushTimer = setTimeout(() => {
       projectsFlushTimer = null;
       flushProjects();
-    }, 0);
+    }, PROJECTS_FLUSH_MS);
   }
 
   async function runProjectsFlush() {
@@ -2429,6 +2444,27 @@ const Storage = (() => {
     return written;
   }
 
+  /**
+   * 換句重看時只改計數，不重寫 items／vocab／tokens，避免整包 clone。
+   * 數字沒變則不落盤。
+   */
+  function patchProjectEntryCounts(projectId, entryId, counts = {}) {
+    const id = String(entryId || "");
+    if (!projectId || !id) return null;
+    const store = loadProjectsStore();
+    const p = store.projects.find((x) => x.id === projectId);
+    if (!p) return null;
+    const e = (p.entries || []).find((x) => x.id === id);
+    if (!e) return null;
+    const owned = Number.isFinite(counts.ownedCount) ? counts.ownedCount : e.ownedCount;
+    const missing = Number.isFinite(counts.missingCount) ? counts.missingCount : e.missingCount;
+    if (e.ownedCount === owned && e.missingCount === missing) return e;
+    e.ownedCount = owned;
+    e.missingCount = missing;
+    saveProjectsStore(store);
+    return e;
+  }
+
   function snapshotLooksReusable(entry) {
     if (!entry) return false;
     if (String(entry.mode || entry.source || "") === "failed") return false;
@@ -2710,6 +2746,7 @@ const Storage = (() => {
     getActiveProject,
     getProjectEntriesSorted,
     upsertProjectEntry,
+    patchProjectEntryCounts,
     removeProjectEntry,
     findProjectEntryByQuery,
     findReusableSnapshotByQuery,

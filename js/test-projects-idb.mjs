@@ -157,6 +157,20 @@ Storage.upsertProjectEntry("proj_1", {
 await Storage.flushProjects();
 if (Storage.getProjectEntriesSorted("proj_1").length !== 2) fail("second entry not in cache");
 
+const patched = Storage.patchProjectEntryCounts("proj_1", "pe_1", {
+  ownedCount: 3,
+  missingCount: 1,
+});
+if (!patched || patched.ownedCount !== 3 || patched.missingCount !== 1) {
+  fail("patch counts not applied");
+}
+const patchedAgain = Storage.patchProjectEntryCounts("proj_1", "pe_1", {
+  ownedCount: 3,
+  missingCount: 1,
+});
+if (patchedAgain !== patched) fail("unchanged counts should return same entry");
+ok("patchProjectEntryCounts updates without rewriting snapshot");
+
 const idbStore = idb._dbs.get("kgn_idb_v1").get("kv").get("projects_v1");
 if (!idbStore || idbStore.projects[0].entries.length !== 2) fail("IDB not flushed");
 ok("flush writes new sentence to IndexedDB");
