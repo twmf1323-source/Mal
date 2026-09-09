@@ -5532,6 +5532,20 @@ a,
     padding: 0.5rem 0.7rem 0.55rem;
   }
 
+  .sentence-board .morph-board {
+    margin: 0.45rem 0 0;
+    padding: 0.45rem 0.55rem 0.55rem;
+  }
+
+  .sentence-label {
+    align-items: flex-start;
+  }
+
+  .pos-line-legend {
+    margin-left: 0;
+    width: 100%;
+  }
+
   #api-inventory-slot.panel-suggest {
     display: none !important;
   }

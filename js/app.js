@@ -592,8 +592,8 @@ const App = (() => {
         fallbackLegacy: inv.fallbackLegacy,
         audit: apiHl.audit,
         inventory: inv,
+        morphHtml: morphBoardHtml(q, inv),
       }) +
-      morphBoardHtml(q, inv) +
       `<div class="lookup-result-body">` +
       localMatchesHtml(apiHl.ownedHits || [], inv) +
       missingInventoryHtml(inv, apiHl.missingItems) +
@@ -5075,6 +5075,7 @@ const App = (() => {
           ${hasVocab ? posUnderlineLegendHtml() : ""}
         </p>
         ${sentenceTextBlockHtml(html || esc(query))}
+        ${options.morphHtml || ""}
         ${editHint}
         ${emptyGrammarNote || ""}
         <ul class="sentence-legend" aria-label="句中規則與補充">
