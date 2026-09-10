@@ -5340,13 +5340,18 @@ a,
 
   #view-settings.view:not(.hidden),
   #view-form.view:not(.hidden) {
-    overflow: auto;
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: scroll;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+    padding-bottom: 0.75rem;
   }
   #view-settings .settings-form,
   #view-form .rule-form {
-    flex: 0 0 auto;
+    flex: none;
     overflow: visible;
     min-height: 0;
   }
