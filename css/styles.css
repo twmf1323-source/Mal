@@ -5151,7 +5151,7 @@ a,
    文法卡／列表在剩餘高度裡單獨捲動，不必跟整頁搶。 */
 @media (orientation: portrait) and (max-width: 1024px) {
   :root {
-    --phone-tab-h: 3.65rem;
+    --phone-tab-h: 0rem;
   }
 
   html,
@@ -5175,20 +5175,20 @@ a,
     padding-top: 0.55rem;
     padding-left: max(0.75rem, env(safe-area-inset-left));
     padding-right: max(0.75rem, env(safe-area-inset-right));
-    padding-bottom: calc(var(--phone-tab-h) + env(safe-area-inset-bottom, 0px) + 0.35rem);
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
   }
 
   .app-header {
     flex: 0 0 auto;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     justify-content: flex-start;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.35rem 0.5rem;
     margin-left: calc(0px - max(0.75rem, env(safe-area-inset-left)));
     margin-right: calc(0px - max(0.75rem, env(safe-area-inset-right)));
     margin-bottom: 0.45rem;
     padding-top: max(0.35rem, env(safe-area-inset-top, 0px));
-    padding-bottom: 0.35rem;
+    padding-bottom: 0.2rem;
     padding-left: max(0.75rem, env(safe-area-inset-left));
     padding-right: max(0.75rem, env(safe-area-inset-right));
   }
@@ -5219,27 +5219,33 @@ a,
   }
 
   .main-nav {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 42;
-    flex: none;
+    position: static;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    z-index: auto;
+    flex: 1 1 100%;
+    order: 2;
     display: flex;
     flex-wrap: nowrap;
     align-items: stretch;
     justify-content: space-between;
     gap: 0.08rem;
     min-width: 0;
-    width: auto;
+    width: 100%;
     overflow: visible;
-    padding: 0.22rem 0.18rem calc(0.22rem + env(safe-area-inset-bottom, 0px));
-    border-top: 1px solid var(--line);
-    background: color-mix(in srgb, var(--bg) 88%, #fff);
-    backdrop-filter: blur(16px) saturate(1.12);
-    -webkit-backdrop-filter: blur(16px) saturate(1.12);
-    box-shadow: 0 -8px 24px color-mix(in srgb, var(--ink) 8%, transparent);
-    transition: transform 0.18s ease;
+    margin: 0.15rem calc(0px - max(0.75rem, env(safe-area-inset-left))) 0
+      calc(0px - max(0.75rem, env(safe-area-inset-right)));
+    padding: 0.18rem max(0.75rem, env(safe-area-inset-left)) 0.28rem
+      max(0.75rem, env(safe-area-inset-right));
+    border-top: 0;
+    border-bottom: 1px solid var(--line);
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+    transform: none;
+    pointer-events: auto;
   }
 
   .nav-btn {
@@ -5590,14 +5596,13 @@ a,
 
   .toast,
   .ai-job-bar {
-    bottom: calc(var(--phone-tab-h) + env(safe-area-inset-bottom, 0px) + 0.45rem);
+    bottom: max(0.85rem, env(safe-area-inset-bottom, 0px));
     width: min(96vw, 520px);
   }
 
-  /* 鍵盤升起：藏底欄，輸入列拉高，結果讓位 */
   html.is-kbd-open .main-nav {
-    transform: translateY(110%);
-    pointer-events: none;
+    transform: none;
+    pointer-events: auto;
   }
 
   html.is-kbd-open .app-shell {
