@@ -73,7 +73,7 @@ const extra = [
   },
 ];
 RS.setAll([
-  ...JSON.parse(fs.readFileSync(path.join(root, "data", "seed-rules.json"), "utf8")),
+  ...JSON.parse(fs.readFileSync(path.join(root, "js", "test-fixtures", "legacy-seed-rules.json"), "utf8")),
   ...extra,
 ]);
 

@@ -22,7 +22,7 @@ vm.runInContext(
   ctx
 );
 const RS = ctx.RulesService;
-const seed = JSON.parse(fs.readFileSync(path.join(root, "data/seed-rules.json"), "utf8"));
+const seed = JSON.parse(fs.readFileSync(path.join(root, "js/test-fixtures/legacy-seed-rules.json"), "utf8"));
 RS.setAll(seed);
 
 function assert(cond, msg) {

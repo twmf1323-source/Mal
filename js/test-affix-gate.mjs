@@ -21,7 +21,7 @@ vm.runInContext(
   ctx
 );
 
-const seed = JSON.parse(fs.readFileSync(path.join(root, "data", "seed-rules.json"), "utf8"));
+const seed = JSON.parse(fs.readFileSync(path.join(root, "js", "test-fixtures", "legacy-seed-rules.json"), "utf8"));
 const geRule = {
   id: "test-adverbial-ge",
   title: "副詞化語尾（-게）",

@@ -217,13 +217,23 @@ const Storage = (() => {
     return ok ? id : DEFAULT_SETTINGS.structureTheme;
   }
 
-  const REMOTE_BASE = "https://twmf1323-source.github.io/Mal/";
+  /** 內建種子卡的 id 一律是 seed- 開頭。使用者新卡是 UUID 或 r_ 開頭。 */
+  function isBuiltinSeedRule(rule) {
+    return String(rule && rule.id || "").startsWith("seed-");
+  }
 
-  function seedUrl() {
-    if (typeof location !== "undefined" && location.protocol === "file:") {
-      return REMOTE_BASE + "data/seed-rules.json";
+  function stripBuiltinSeedRules(rules) {
+    const list = Array.isArray(rules) ? rules : [];
+    const next = [];
+    let changed = false;
+    for (const rule of list) {
+      if (!rule || isBuiltinSeedRule(rule)) {
+        changed = true;
+        continue;
+      }
+      next.push(rule);
     }
-    return "data/seed-rules.json";
+    return { rules: next, changed };
   }
 
   function loadRules() {
@@ -238,8 +248,10 @@ const Storage = (() => {
   }
 
   function saveRules(rules) {
-    localStorage.setItem(RULES_KEY, JSON.stringify(rules));
+    const kept = stripBuiltinSeedRules(rules).rules;
+    localStorage.setItem(RULES_KEY, JSON.stringify(kept));
     setMeta({ lastSaved: new Date().toISOString() });
+    return kept;
   }
 
   function loadTodos() {
@@ -607,106 +619,51 @@ const Storage = (() => {
     return { rules: out, changed };
   }
 
-  /** 補上本機尚未有的種子卡（例如新加的 請托、平語） */
-  function ensureMissingSeedRules(rules, seedList) {
-    if (!Array.isArray(rules)) return { rules: [], changed: false };
-    if (!Array.isArray(seedList) || !seedList.length) return { rules, changed: false };
-    const byId = new Map(rules.filter((r) => r && r.id).map((r) => [r.id, r]));
-    const titles = new Set(
-      [...byId.values()].map((r) => titleDedupeKey(r?.title)).filter(Boolean)
-    );
-    let changed = false;
-    for (const s of seedList) {
-      if (!s || !s.id) continue;
-      if (byId.has(s.id)) continue;
-      // 使用者已自建同標題時不重複插入（例如已有 해체（반말））
-      const seedTitle = String(s.title || "").trim();
-      const seedKey = titleDedupeKey(seedTitle);
-      if (seedKey && titles.has(seedKey)) continue;
-      // 使用者已有即將更名成此種子標題的舊卡，勿再插一張
-      if (
-        seedTitle &&
-        [...byId.values()].some((r) => TITLE_RENAMES[String(r?.title || "").trim()] === seedTitle)
-      ) {
-        continue;
-      }
-      byId.set(s.id, {
-        ...s,
-        created_at: s.created_at || SEED_EPOCH,
-        updated_at: s.updated_at || s.created_at || SEED_EPOCH,
-      });
-      if (seedKey) titles.add(seedKey);
-      changed = true;
-    }
-    return { rules: Array.from(byId.values()), changed };
-  }
-
+  /**
+   * 開啟筆記本時去掉全部內建種子卡。不再讀 seed-rules.json，也不從 GitHub Pages 補回。
+   * 使用者自己建的規則留下。
+   */
   async function initWithSeed() {
-    let rules = loadRules();
-    if (rules && rules.length > 0) {
-      let next = rules;
-      let changed = false;
-      // 補齊新增種子（不覆蓋使用者已有同 id）
-      try {
-        const res = await fetch(seedUrl());
-        if (res.ok) {
-          const seedList = await res.json();
-          const ens = ensureMissingSeedRules(next, seedList);
-          next = ens.rules;
-          changed = ens.changed || changed;
-        }
-      } catch {
-        /* 離線時略過 */
-      }
-      // 母音縮約：舊短名／錯結構 → 括號寫套用範圍（하＋여→해 等）
-      const mig = migrateVowelContractionSeeds(next);
-      next = mig.rules;
-      changed = mig.changed || changed;
-      const titleMig = migrateRuleTitles(next);
-      next = titleMig.rules;
-      changed = titleMig.changed || changed;
-      const dedupe = dedupeDuplicateRules(next);
-      next = dedupe.rules;
-      changed = changed || dedupe.changed;
+    let next = loadRules();
+    if (!Array.isArray(next)) next = [];
+    let changed = false;
+    const stripped = stripBuiltinSeedRules(next);
+    next = stripped.rules;
+    changed = stripped.changed || changed;
+    const mig = migrateVowelContractionSeeds(next);
+    next = mig.rules;
+    changed = mig.changed || changed;
+    const titleMig = migrateRuleTitles(next);
+    next = titleMig.rules;
+    changed = titleMig.changed || changed;
+    const dedupe = dedupeDuplicateRules(next);
+    next = dedupe.rules;
+    changed = changed || dedupe.changed;
 
-      const meta = getMeta();
-      if (mig.changed && !meta.vowelScopeTitleV1At) {
-        setMeta({
-          vowelScopeTitleV1At: new Date().toISOString(),
-          vowelYeoMigratedAt: new Date().toISOString(),
-        });
-      }
-      if (!meta.vowelYeoSortFixedAt) {
-        const sortFix = restoreSeedVowelSortOrder(next);
-        next = sortFix.rules;
-        changed = sortFix.changed || changed;
-        setMeta({ vowelYeoSortFixedAt: new Date().toISOString() });
-      }
-      // v2：依分類＋種子序重排本機陣列（解決「時間戳已壓回但陣列仍亂」）
-      if (!meta.rulesCanonicalSortV2At) {
-        const reo = reorderRulesCanonical(next);
-        next = reo.rules;
-        changed = reo.changed || changed;
-        setMeta({ rulesCanonicalSortV2At: new Date().toISOString() });
-      }
-      if (changed) saveRules(next);
-      return next;
+    const meta = getMeta();
+    if (mig.changed && !meta.vowelScopeTitleV1At) {
+      setMeta({
+        vowelScopeTitleV1At: new Date().toISOString(),
+        vowelYeoMigratedAt: new Date().toISOString(),
+      });
     }
-    try {
-      const res = await fetch(seedUrl());
-      if (!res.ok) throw new Error("seed fetch failed");
-      rules = await res.json();
-    } catch {
-      rules = [];
+    if (!meta.vowelYeoSortFixedAt) {
+      const sortFix = restoreSeedVowelSortOrder(next);
+      next = sortFix.rules;
+      changed = sortFix.changed || changed;
+      setMeta({ vowelYeoSortFixedAt: new Date().toISOString() });
     }
-    const ordered = reorderRulesCanonical(rules);
-    saveRules(ordered.rules);
-    setMeta({
-      seeded: true,
-      seededAt: new Date().toISOString(),
-      rulesCanonicalSortV2At: new Date().toISOString(),
-    });
-    return ordered.rules;
+    if (!meta.rulesCanonicalSortV2At) {
+      const reo = reorderRulesCanonical(next);
+      next = reo.rules;
+      changed = reo.changed || changed;
+      setMeta({ rulesCanonicalSortV2At: new Date().toISOString() });
+    }
+    if (!meta.builtinSeedsRemovedAt) {
+      setMeta({ builtinSeedsRemovedAt: new Date().toISOString() });
+    }
+    if (changed) saveRules(next);
+    return next;
   }
 
   function exportRulesJSON(rules) {
@@ -718,7 +675,7 @@ const Storage = (() => {
    * 相容舊版純規則陣列匯入；新檔為 { type, rules, projects }
    */
   function exportDataJSON(rules) {
-    const list = Array.isArray(rules) ? rules : loadRules() || [];
+    const list = stripBuiltinSeedRules(Array.isArray(rules) ? rules : loadRules() || []).rules;
     return JSON.stringify(
       {
         type: "mal-korean-grammar-backup",
@@ -745,18 +702,14 @@ const Storage = (() => {
 
   function importRulesArray(incoming, mode = "merge") {
     if (!Array.isArray(incoming)) throw new Error("規則必須是陣列");
-    const current = loadRules() || [];
-    if (mode === "replace") {
-      saveRules(incoming);
-      return incoming;
-    }
+    const incomingKept = stripBuiltinSeedRules(incoming).rules;
+    const current = stripBuiltinSeedRules(loadRules() || []).rules;
+    if (mode === "replace") return saveRules(incomingKept);
     const byId = new Map(current.map((r) => [r.id, r]));
-    for (const r of incoming) {
+    for (const r of incomingKept) {
       if (r && r.id) byId.set(r.id, r);
     }
-    const merged = Array.from(byId.values());
-    saveRules(merged);
-    return merged;
+    return saveRules(Array.from(byId.values()));
   }
 
   /**
@@ -813,6 +766,53 @@ const Storage = (() => {
     localStorage.removeItem(RULES_KEY);
     localStorage.removeItem(TODOS_KEY);
     setMeta({ resetAt: new Date().toISOString() });
+  }
+
+  /**
+   * 刪除筆記本內容：規則、待辦、專案（含 IndexedDB）、單字本、查詢歷史。不載入預設種子。
+   * 保留 API 設定。單字本的來源（歷史、專案句子）一併清掉，避免下次開啟再被收回來。
+   */
+  async function clearAllNotebookData() {
+    adoptProjectsCache(emptyProjectsStore());
+    projectsDirty = true;
+    try {
+      localStorage.removeItem(ACTIVE_PROJECT_KEY);
+    } catch {
+      /* ignore */
+    }
+
+    let idbCleared = false;
+    try {
+      if (idbAvailable()) {
+        if (!projectsDb) projectsDb = await openProjectsDb();
+        projectsBackend = "idb";
+        await flushProjects();
+        await idbPut(projectsDb, IDB_PROJECTS_KEY, emptyProjectsStore());
+        projectsDirty = false;
+        idbCleared = true;
+        try {
+          writeProjectsLocalStorageStub();
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (err) {
+      console.warn("[clear all] IndexedDB", err);
+    }
+    if (!idbCleared) {
+      writeProjectsLocalStorageFull(emptyProjectsStore());
+      projectsBackend = "localStorage";
+      projectsDirty = false;
+    }
+
+    clearHistory();
+    vocabBankCache = null;
+    try {
+      localStorage.removeItem(VOCAB_BANK_KEY);
+    } catch {
+      /* ignore */
+    }
+    resetToSeed();
   }
 
   /**
@@ -1793,7 +1793,7 @@ const Storage = (() => {
       .replace(/\s+/g, " ");
   }
 
-  /* 大項 collections 只做容器；句子只存在分項 project */
+  /* 大項 collections 只做容器；句子只存在分項 project。專案列表會把全部分項直接鋪開。 */
   const UNGROUPED_COLLECTION_ID = "";
 
   function normalizeCollection(raw) {
@@ -2666,6 +2666,280 @@ const Storage = (() => {
     return importProjectsList(incoming, "merge");
   }
 
+  /**
+   * 雲端資料夾：記住使用者選的 iCloud／Google 雲端硬碟資料夾，讀寫同一份 mal-backup.json。
+   * FileSystemHandle 只能放 IndexedDB。
+   */
+  const CLOUD_IDB_NAME = "kgn_cloud_v1";
+  const CLOUD_IDB_VERSION = 1;
+  const CLOUD_STORE = "kv";
+  const CLOUD_HANDLE_KEY = "dir";
+  const CLOUD_META_KEY = "kgn_cloud_meta_v1";
+  const CLOUD_BACKUP_FILE = "mal-backup.json";
+  const CLOUD_BACKUP_TMP = "mal-backup.json.tmp";
+  let cloudDbPromise = null;
+  /** undefined＝尚未讀過；null＝沒有連結 */
+  let cloudHandleCache;
+
+  function cloudFolderSupported() {
+    return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
+  }
+
+  function openCloudDb() {
+    if (!idbAvailable()) return Promise.reject(new Error("這個瀏覽器沒有 IndexedDB，不能記住資料夾"));
+    if (!cloudDbPromise) {
+      cloudDbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(CLOUD_IDB_NAME, CLOUD_IDB_VERSION);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(CLOUD_STORE)) db.createObjectStore(CLOUD_STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => {
+          cloudDbPromise = null;
+          reject(req.error || new Error("無法記住雲端資料夾"));
+        };
+      });
+    }
+    return cloudDbPromise;
+  }
+
+  function cloudIdbGet(db, key) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(CLOUD_STORE, "readonly");
+      const req = tx.objectStore(CLOUD_STORE).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function cloudIdbPut(db, key, value) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(CLOUD_STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error("雲端資料夾寫入中止"));
+      tx.onerror = () => reject(tx.error || new Error("雲端資料夾寫入失敗"));
+      tx.objectStore(CLOUD_STORE).put(value, key);
+    });
+  }
+
+  function cloudIdbDelete(db, key) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(CLOUD_STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error("雲端資料夾刪除中止"));
+      tx.onerror = () => reject(tx.error || new Error("雲端資料夾刪除失敗"));
+      tx.objectStore(CLOUD_STORE).delete(key);
+    });
+  }
+
+  function loadCloudMeta() {
+    try {
+      const raw = localStorage.getItem(CLOUD_META_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveCloudMeta(patch) {
+    const next = { ...loadCloudMeta(), ...patch };
+    localStorage.setItem(CLOUD_META_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  function rememberCloudHandle(handle) {
+    cloudHandleCache = handle && typeof handle.getFileHandle === "function" ? handle : null;
+    return cloudHandleCache;
+  }
+
+  async function loadCloudHandle() {
+    if (cloudHandleCache !== undefined) return cloudHandleCache;
+    const db = await openCloudDb();
+    const handle = await cloudIdbGet(db, CLOUD_HANDLE_KEY);
+    return rememberCloudHandle(handle);
+  }
+
+  async function ensureCloudPermission(handle, mode) {
+    const opts = { mode };
+    try {
+      if (typeof handle.queryPermission === "function") {
+        if ((await handle.queryPermission(opts)) === "granted") return true;
+      }
+      if (typeof handle.requestPermission === "function") {
+        return (await handle.requestPermission(opts)) === "granted";
+      }
+    } catch (err) {
+      if (err && (err.name === "NotAllowedError" || err.name === "SecurityError" || err.name === "AbortError")) {
+        return false;
+      }
+      throw err;
+    }
+    return true;
+  }
+
+  async function cloudFolderStatus() {
+    const meta = loadCloudMeta();
+    const supported = cloudFolderSupported();
+    let handle = null;
+    let permission = "missing";
+    try {
+      handle = await loadCloudHandle();
+    } catch {
+      handle = null;
+    }
+    if (handle) {
+      try {
+        if (typeof handle.queryPermission === "function") {
+          permission = await handle.queryPermission({ mode: "readwrite" });
+        } else {
+          permission = "granted";
+        }
+      } catch {
+        permission = "prompt";
+      }
+    }
+    return {
+      supported,
+      linked: Boolean(handle),
+      name: (handle && handle.name) || meta.name || "",
+      permission,
+      syncedAt: meta.syncedAt || "",
+      loadedAt: meta.loadedAt || "",
+      fileName: CLOUD_BACKUP_FILE,
+    };
+  }
+
+  async function ensureCloudFolderPermission(mode = "readwrite") {
+    const handle = cloudHandleCache !== undefined ? cloudHandleCache : await loadCloudHandle();
+    if (!handle) return false;
+    return ensureCloudPermission(handle, mode);
+  }
+
+  async function pickCloudFolder() {
+    if (!cloudFolderSupported()) {
+      throw new Error("此瀏覽器不能記住資料夾。請用 Chrome 或 Edge 開啟 http://127.0.0.1:8080/ 。");
+    }
+    let handle;
+    try {
+      try {
+        handle = await window.showDirectoryPicker({
+          id: "mal-cloud-backup",
+          mode: "readwrite",
+        });
+      } catch (err) {
+        if (err && err.name === "TypeError") {
+          handle = await window.showDirectoryPicker({ mode: "readwrite" });
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        const cancel = new Error("已取消");
+        cancel.name = "AbortError";
+        throw cancel;
+      }
+      throw err;
+    }
+    const db = await openCloudDb();
+    await cloudIdbPut(db, CLOUD_HANDLE_KEY, handle);
+    rememberCloudHandle(handle);
+    saveCloudMeta({
+      name: handle.name || "",
+      linkedAt: new Date().toISOString(),
+      syncedAt: "",
+      loadedAt: "",
+    });
+    return { name: handle.name || "" };
+  }
+
+  async function unlinkCloudFolder() {
+    cloudHandleCache = null;
+    try {
+      const db = await openCloudDb();
+      await cloudIdbDelete(db, CLOUD_HANDLE_KEY);
+    } catch {
+      /* 權限紀錄清不掉時，仍清本機狀態 */
+    }
+    try {
+      localStorage.removeItem(CLOUD_META_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function writeTextToDir(dirHandle, name, text) {
+    const fileHandle = await dirHandle.getFileHandle(name, { create: true });
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(text);
+      await writable.close();
+    } catch (err) {
+      try {
+        await writable.abort();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+    return fileHandle;
+  }
+
+  async function writeCloudBackup(json) {
+    const handle = await loadCloudHandle();
+    if (!handle) throw new Error("尚未連結資料夾");
+    const ok = await ensureCloudPermission(handle, "readwrite");
+    if (!ok) throw new Error("沒有寫入這個資料夾的權限。請再按一次「連結資料夾」。");
+    const text = typeof json === "string" ? json : JSON.stringify(json);
+    const tmp = await writeTextToDir(handle, CLOUD_BACKUP_TMP, text);
+    if (typeof tmp.move === "function") {
+      try {
+        await tmp.move(CLOUD_BACKUP_FILE);
+      } catch (err) {
+        if (!err || err.name !== "InvalidModificationError") throw err;
+        try {
+          await handle.removeEntry(CLOUD_BACKUP_FILE);
+        } catch {
+          /* 目標檔可能不存在 */
+        }
+        await tmp.move(CLOUD_BACKUP_FILE);
+      }
+    } else {
+      await writeTextToDir(handle, CLOUD_BACKUP_FILE, text);
+      try {
+        await handle.removeEntry(CLOUD_BACKUP_TMP);
+      } catch {
+        /* ignore */
+      }
+    }
+    const syncedAt = new Date().toISOString();
+    saveCloudMeta({ name: handle.name || "", syncedAt });
+    return { name: handle.name || "", fileName: CLOUD_BACKUP_FILE, syncedAt };
+  }
+
+  async function readCloudBackup() {
+    const handle = await loadCloudHandle();
+    if (!handle) throw new Error("尚未連結資料夾");
+    const ok = await ensureCloudPermission(handle, "read");
+    if (!ok) throw new Error("沒有讀取這個資料夾的權限。請再按一次「連結資料夾」。");
+    let fileHandle;
+    try {
+      fileHandle = await handle.getFileHandle(CLOUD_BACKUP_FILE);
+    } catch (err) {
+      if (err && err.name === "NotFoundError") {
+        throw new Error(`「${handle.name || "資料夾"}」裡還沒有 ${CLOUD_BACKUP_FILE}。請先在放著這份筆記本的電腦按「同步到雲端」。`);
+      }
+      throw err;
+    }
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    const loadedAt = new Date().toISOString();
+    saveCloudMeta({ name: handle.name || "", loadedAt });
+    return { text, name: handle.name || "", fileName: CLOUD_BACKUP_FILE, loadedAt };
+  }
+
   return {
     loadRules,
     saveRules,
@@ -2679,6 +2953,7 @@ const Storage = (() => {
     importRulesJSON,
     importDataJSON,
     resetToSeed,
+    clearAllNotebookData,
     loadSettings,
     saveSettings,
     clearApiKey,
@@ -2759,5 +3034,13 @@ const Storage = (() => {
     measureLocalStorageUsage,
     formatStorageBytes,
     normalizeQueryKey,
+    CLOUD_BACKUP_FILE,
+    cloudFolderSupported,
+    cloudFolderStatus,
+    ensureCloudFolderPermission,
+    pickCloudFolder,
+    unlinkCloudFolder,
+    writeCloudBackup,
+    readCloudBackup,
   };
 })();

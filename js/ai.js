@@ -12,8 +12,10 @@ const AiService = (() => {
 規則：
 1. n 必須「功能名稱（韓語標記）」，全形括號。標準例：**禁止（-지 마）**、禮貌體（-아/어요）、主格（이/가）、所有格（의）。中文＝極短功能名；括號內只寫韓語標記。禁止長句標題、禁止韓語在外。禁止 해요體／主題助詞／定語助詞／所有格助詞 等別名。
 2. 無變化格子、keywords。不規則獨立概念；通則可在 e 提「例外見 ○○ 不規則」。
-3. e 只寫用法，盡量無例句。
-4. s 必填：＋ 連零件；→ 結果；開/閉音節同一卡用全形／分列，**開在前閉在後**。
+3. e 必須用繁體中文寫 2–5 句用法，盡量無例句。禁止用韓文寫說明。韓文只可夾在中文句子裡當標記（아요、은/는），不可整句或整段用韓文。
+   正確：「日常禮貌體。詞幹後接 -아요／-어요／-여요（하다→해요）。」
+   錯誤：「일상적인 존댓말이다. 어간에 -아요를 붙인다.」
+4. s 必填，用中文零件名：＋ 連零件；→ 結果。例：「詞幹＋아/어＋요」「開音節＋았/었→ㅆ받침 ／ 閉音節＋았/었＋語尾」。禁止「어간＋아/어＋요」這類韓文結構。開/閉音節同一卡用全形／分列，**開在前閉在後**。
 5. 一次一主題（人稱縮約只寫該形；母音縮約只寫 해／여／돼 等該形；-는데 只寫本句詞類）。
 6. 母音縮約標題必須寫「套用範圍」在括號內，禁止只寫「母音縮約」或只寫（해）／（여）／（돼）：
    - 母音縮約（하＋여→해）｜母音縮約（이＋어→여）｜母音縮約（되＋어→돼）
@@ -511,30 +513,84 @@ z/k（nameZh/nameKo）可省略（前端從 n 拆）。
     return content;
   }
 
-  async function completeRuleFromTitle(title) {
-    const t = String(title || "").trim();
-    if (!t) throw new Error("請先填寫規則名");
+  function hangulHanziCounts(text) {
+    const s = String(text || "");
+    return {
+      hangul: (s.match(/[\uAC00-\uD7A3]/g) || []).length,
+      hanzi: (s.match(/[\u4E00-\u9FFF]/g) || []).length,
+    };
+  }
 
+  /** 說明與結構式要是中文；韓文只可當標記。 */
+  function ruleDraftInChinese(draft) {
+    const explanation = String(draft?.explanation || "");
+    const structure = String(draft?.structure || "");
+    const ec = hangulHanziCounts(explanation);
+    const sc = hangulHanziCounts(structure);
+    const explanationOk =
+      !explanation.trim() ||
+      (ec.hangul === 0 && ec.hanzi > 0) ||
+      (ec.hanzi >= 4 && ec.hangul <= ec.hanzi + 6);
+    const structureOk = !sc.hangul || sc.hanzi >= 1;
+    return explanationOk && structureOk;
+  }
+
+  const RULE_FILL_USER =
+    "請輸出短鍵 JSON：n/c/e/s。n 必須「功能名稱（韓語標記）」，如 禁止（-지 마）、禮貌體（-아/어요）。e 必須繁體中文，禁止用韓文寫說明。s 用中文結構式（詞幹＋…），韓文只留在標記裡。e 無例句。一次一主題。開/閉音節同卡時開在前、全形／分隔。";
+
+  async function requestRuleCard(title, extra) {
     const content = await chatComplete({
       messages: [
         { role: "system", content: RULE_SYSTEM },
         {
           role: "user",
-          content: `規則名：${t}\n\n請輸出短鍵 JSON：n/c/e/s。n 必須「功能名稱（韓語標記）」，如 禁止（-지 마）、禮貌體（-아/어요）。e 無例句；s 必填。一次一主題。開/閉音節同卡時開在前、全形／分隔。`,
+          content: `規則名：${title}\n\n${RULE_FILL_USER}${extra || ""}`,
         },
       ],
       temperature: 0.25,
       json: true,
     });
+    return normalizeDraft(extractJson(content), title);
+  }
 
-    const parsed = extractJson(content);
-    return normalizeDraft(parsed, t);
+  async function completeRuleFromTitle(title) {
+    const t = String(title || "").trim();
+    if (!t) throw new Error("請先填寫規則名");
+    let draft = await requestRuleCard(t);
+    if (!ruleDraftInChinese(draft)) {
+      draft = await requestRuleCard(
+        t,
+        "\n\n上一則把說明或結構寫成韓文了。請重寫：e 整段改繁體中文，s 改成中文結構式（詞幹＋韓語標記）。不要用韓文寫句子。"
+      );
+    }
+    return draft;
   }
 
   const RULE_BATCH_SYSTEM = `${RULE_SYSTEM}
 
 批次時只輸出：{"r":[{...},{...}]}
-r 的順序必須對應使用者列出的規則名；每一項仍用短鍵 n/c/e/s。不要 markdown。`;
+r 的順序必須對應使用者列出的規則名；每一項仍用短鍵 n/c/e/s。每一張 e 必須繁體中文，s 必須中文結構式。不要用韓文寫說明。不要 markdown。`;
+
+  function rowsToDrafts(parsed, names) {
+    const rawArr = Array.isArray(parsed?.r)
+      ? parsed.r
+      : Array.isArray(parsed?.rules)
+        ? parsed.rules
+        : Array.isArray(parsed)
+          ? parsed
+          : [];
+    return names.map((name, i) => {
+      let row = rawArr[i];
+      if (!row || typeof row !== "object") {
+        const want = name;
+        row = rawArr.find((x) => {
+          const n = String(pickField(x, "n", "title") || "").trim();
+          return n && (n === want || n.includes(want) || want.includes(n));
+        });
+      }
+      return normalizeDraft(row || {}, name);
+    });
+  }
 
   /**
    * 依規則名批次生成卡片內容（不寫入筆記本）。
@@ -574,7 +630,7 @@ r 的順序必須對應使用者列出的規則名；每一項仍用短鍵 n/c/e
         { role: "system", content: RULE_BATCH_SYSTEM },
         {
           role: "user",
-          content: `請依序為下列規則名各產出一張卡（短鍵 n/c/e/s；包在 r 陣列）：\n${unique
+          content: `請依序為下列規則名各產出一張卡（短鍵 n/c/e/s；包在 r 陣列）。每一張 e 必須繁體中文，禁止用韓文寫說明；s 用中文結構式（詞幹＋韓語標記）：\n${unique
             .map((n, i) => `${i + 1}. ${n}`)
             .join("\n")}`,
         },
@@ -583,26 +639,26 @@ r 的順序必須對應使用者列出的規則名；每一項仍用短鍵 n/c/e
       json: true,
     });
 
-    const parsed = extractJson(content);
-    const rawArr = Array.isArray(parsed?.r)
-      ? parsed.r
-      : Array.isArray(parsed?.rules)
-        ? parsed.rules
-        : Array.isArray(parsed)
-          ? parsed
-          : [];
-
-    const byUnique = unique.map((name, i) => {
-      let row = rawArr[i];
-      if (!row || typeof row !== "object") {
-        const want = name;
-        row = rawArr.find((x) => {
-          const n = String(pickField(x, "n", "title") || "").trim();
-          return n && (n === want || n.includes(want) || want.includes(n));
-        });
-      }
-      return normalizeDraft(row || {}, name);
-    });
+    let byUnique = rowsToDrafts(extractJson(content), unique);
+    if (byUnique.some((draft) => !ruleDraftInChinese(draft))) {
+      const again = await chatComplete({
+        messages: [
+          { role: "system", content: RULE_BATCH_SYSTEM },
+          {
+            role: "user",
+            content: `上一則有說明或結構寫成韓文。請依序重寫下列每一張：e 整段改繁體中文，s 改成中文結構式（詞幹＋韓語標記）。不要用韓文寫句子。短鍵 n/c/e/s，包在 r：\n${unique
+              .map((n, i) => `${i + 1}. ${n}`)
+              .join("\n")}`,
+          },
+        ],
+        temperature: 0.2,
+        json: true,
+      });
+      const rewritten = rowsToDrafts(extractJson(again), unique);
+      byUnique = byUnique.map((draft, i) =>
+        ruleDraftInChinese(draft) ? draft : rewritten[i] || draft
+      );
+    }
 
     return list.map((name, i) => {
       const u = mapToUnique[i];
@@ -937,6 +993,192 @@ p 必須完整中文詞性。`,
     return w;
   }
 
+  const LYRIC_SPLIT_SYSTEM = `你是韓語歌詞編輯。把文本依「畫面／短語／子句」切開，讓每一行是一個完整意思單位。
+
+必須只輸出一個 JSON 物件（不要 markdown、不要圍欄、不要其他文字）：
+{"lines":["第一行","第二行"]}
+
+規則：
+1. 不要改寫、不要翻譯、不要增刪用字、不要加標點。只決定換行。原文順序與用字必須原樣保留。
+2. 詞與詞之間的空白要保留在行內，不要每個空格都斷行。已有換行可當句界；不要合併意思不相接的行。
+3. 每一行最多 12 字（韓文一音節算 1，含空格）。超過 12 字必須再切；已 ≤12 且意思完整的行不要再切。
+4. 切在「畫面／短語交界」，不要切在修飾關係中間：
+   - 「A의 B」盡量整組保留（백금빛의 바다、정체 속）。禁止切成「백금빛의／바다」。
+   - 「A 속에서／앞에서／뒤에／사이에」是完整場所短語，切在該短語之後、下一句主語之前。
+   - 主謂句（당신은 도시로 돌아간다）若 ≤12 字整句保留，不要切成「당신은／도시로 돌아간다」。
+5. 不要把詞從中間切斷。하고 있다／아 주다／지 않다／ㄹ 수 있다 保持同一行。
+6. 連接語尾 고／서／며／는데／지만／니까 可當切點（切在該語尾之後）。
+
+正確例子：
+輸入：선글라스 너머 백금빛 바다 정체 속에서 당신은 도시로 돌아간다
+輸出：{"lines":["선글라스 너머","백금빛 바다","정체 속에서","당신은 도시로 돌아간다"]}`;
+
+  const PHONE_LINE_SOFT = 10;
+  const PHONE_LINE_HARD = 12;
+
+  function charLen(s) {
+    return Array.from(String(s || "")).length;
+  }
+
+  function compactSource(s) {
+    return String(s || "").replace(/\s+/g, "");
+  }
+
+  function indexAfterChars(s, count) {
+    return Array.from(String(s || "")).slice(0, Math.max(0, count)).join("").length;
+  }
+
+  function scoreMeaningCut(chars, i) {
+    const n = chars.length;
+    if (i < 3 || i > n - 2) return -1;
+    const last = chars[i - 1] || "";
+    const next = chars[i] || "";
+    const tail = chars.slice(Math.max(0, i - 6), i).join("");
+    const rest = chars.slice(i).join("");
+    if (last === "의") return -1;
+    if (last === "하" && /[고지였여]/.test(next)) return -1;
+    if (last === "했" && /[어어요다]/.test(next)) return -1;
+    if ((last === "아" || last === "어") && /[요줘서도]/.test(next)) return -1;
+    if (last === "지" && /^\s*않/.test(rest)) return -1;
+    if (last === "고" && /^\s*있/.test(rest)) return -1;
+    if (last === "수" && /^\s*[있없]/.test(rest)) return -1;
+    if (/\s/.test(last) && /않/.test(next) && (chars[i - 2] || "") === "지") return -1;
+    if (/\s/.test(last) && /있/.test(next) && (chars[i - 2] || "") === "고") return -1;
+    if (/\s/.test(last) && /[있없]/.test(next) && (chars[i - 2] || "") === "수") return -1;
+    let score = 0;
+    if (/[。．｡！？!?…]/.test(last)) score += 100;
+    else if (/[、，,､]/.test(last)) score += 86;
+    else if (
+      tail.endsWith("지만") ||
+      tail.endsWith("는데") ||
+      tail.endsWith("니까") ||
+      tail.endsWith("면서") ||
+      tail.endsWith("다가") ||
+      tail.endsWith("도록")
+    ) {
+      score += 78;
+    } else if (tail.endsWith("에서") || tail.endsWith("으로") || tail.endsWith("에게") || tail.endsWith("속에")) {
+      score += 72;
+    } else if (last === "고" || last === "서" || last === "며" || last === "면") score += 68;
+    else if (last === "을" || last === "를") score += 48;
+    else if (last === "에" || last === "로" || last === "와" || last === "과") score += 40;
+    else if (/\s/.test(last)) score += 40;
+    else if (last === "은" || last === "는" || last === "이" || last === "가") score += 18;
+    else return -1;
+    if (i <= PHONE_LINE_HARD) score += 8;
+    const dist = Math.abs(i - PHONE_LINE_SOFT);
+    score += Math.max(0, 10 - dist);
+    return score;
+  }
+
+  function findMeaningCut(s) {
+    const chars = Array.from(String(s || ""));
+    const n = chars.length;
+    if (n <= PHONE_LINE_HARD) return 0;
+    const min = 3;
+    const max = Math.min(PHONE_LINE_HARD, n - 2);
+    let bestI = 0;
+    let bestScore = 9;
+    for (let i = max; i >= min; i -= 1) {
+      const sc = scoreMeaningCut(chars, i);
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestI = i;
+      }
+    }
+    return bestI ? indexAfterChars(s, bestI) : 0;
+  }
+
+  function splitLongLineByMeaning(line) {
+    const s = String(line || "").trim();
+    if (!s) return [];
+    if (charLen(s) <= PHONE_LINE_HARD) return [s];
+    const cut = findMeaningCut(s);
+    if (!cut) {
+      const chars = Array.from(s);
+      const left = chars.slice(0, PHONE_LINE_HARD).join("");
+      const right = chars.slice(PHONE_LINE_HARD).join("");
+      return [left, ...splitLongLineByMeaning(right)];
+    }
+    const left = s.slice(0, cut).trim();
+    const right = s.slice(cut).trim();
+    if (!left || !right) return [s];
+    return [left, ...splitLongLineByMeaning(right)];
+  }
+
+  function enforcePhoneLineLength(lines) {
+    return (Array.isArray(lines) ? lines : [lines])
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .flatMap((line) => splitLongLineByMeaning(line));
+  }
+
+  function chunkLyricText(text) {
+    const lines = String(text || "").split(/\r?\n/);
+    const chunks = [];
+    let buf = [];
+    let size = 0;
+    const flush = () => {
+      if (!buf.length) return;
+      chunks.push(buf.join("\n"));
+      buf = [];
+      size = 0;
+    };
+    for (const line of lines) {
+      const add = line.length + 1;
+      if (buf.length && size + add > 1400) flush();
+      buf.push(line);
+      size += add;
+    }
+    flush();
+    return chunks.length ? chunks : [String(text || "")];
+  }
+
+  function normalizeSplitLines(parsed) {
+    let arr = [];
+    if (Array.isArray(parsed)) arr = parsed;
+    else if (Array.isArray(parsed?.lines)) arr = parsed.lines;
+    else if (Array.isArray(parsed?.sentences)) arr = parsed.sentences;
+    return arr.map((x) => String(x || "").trim()).filter(Boolean);
+  }
+
+  async function splitLyricChunk(chunk) {
+    const content = await chatComplete({
+      messages: [
+        { role: "system", content: LYRIC_SPLIT_SYSTEM },
+        {
+          role: "user",
+          content: `請依畫面／短語切開，每行最多 12 字。詞間空白不要逐一斷行。只輸出 JSON。\n\n${chunk}`,
+        },
+      ],
+      temperature: 0.15,
+      json: true,
+    });
+    return normalizeSplitLines(extractJson(content));
+  }
+
+  async function splitLyricLines(text) {
+    const raw = String(text || "");
+    if (!raw.trim()) throw new Error("請先貼上歌詞或文本");
+    const chunks = chunkLyricText(raw);
+    const collected = [];
+    for (const chunk of chunks) {
+      const part = await splitLyricChunk(chunk);
+      collected.push(...part);
+    }
+    const lines = enforcePhoneLineLength(collected);
+    if (!lines.length) throw new Error("AI 沒有回傳可分行的句子");
+    const src = compactSource(raw);
+    const out = compactSource(lines.join(""));
+    if (src && out && src !== out) {
+      if (src.includes(out) || out.includes(src)) {
+        return lines;
+      }
+      throw new Error("AI 改動了原文用字，已取消套用");
+    }
+    return lines;
+  }
+
   async function testConnection() {
     const content = await chatComplete({
       messages: [
@@ -954,6 +1196,8 @@ p 必須完整中文詞性。`,
     completeRulesFromNames,
     fillMissingRuleDrafts,
     completeWordFromSurface,
+    splitLyricLines,
+    enforcePhoneLineLength,
     mapGrammarFunctions,
     inventoryByKoParse,
     inventoryGrammar,

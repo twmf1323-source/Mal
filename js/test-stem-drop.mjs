@@ -212,7 +212,7 @@ vm.runInContext(
     "\n;this.RulesService = RulesService; this.AffixGate = AffixGate;",
   rankCtx
 );
-const seed = JSON.parse(fs.readFileSync(path.join(root, "data", "seed-rules.json"), "utf8"));
+const seed = JSON.parse(fs.readFileSync(path.join(root, "js", "test-fixtures", "legacy-seed-rules.json"), "utf8"));
 rankCtx.RulesService.setAll(seed);
 
 const RS = rankCtx.RulesService;
